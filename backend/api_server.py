@@ -59,8 +59,28 @@ analytics_service = AnalyticsService()
 excel_import_service = ExcelImportService(db)
 auto_runner_service = AutoRunnerService()
 
+# Start background services for production/gunicorn
+def start_background_services():
+    try:
+        check_interval = int(os.getenv('INCREMENTAL_SCRAPING_INTERVAL', 30))
+        sync_interval = int(os.getenv('AUTO_SYNC_INTERVAL', 5))
+        
+        logger.info(f"Background services starting: Scraper every {check_interval}m, Sync every {sync_interval}m")
+        
+        # Check if already started
+        if get_auto_sync_service() is None:
+            start_incremental_scraping_scheduler(check_interval)
+            start_auto_sync_service(sync_interval)
+            logger.info("Background services successfully started")
+    except Exception as e:
+        logger.error(f"Failed to start background services: {e}")
+
+# Call immediately so it runs when imported by gunicorn
+start_background_services()
+
 # API Key validation
 BACKEND_API_KEY = os.getenv('BACKEND_API_KEY', 't_hmXetfMCq3')
+
 
 
 def validate_api_key(request_obj):
@@ -1712,31 +1732,18 @@ def internal_error(error):
 if __name__ == '__main__':
     from datetime import datetime
 
-    port = os.getenv('BACKEND_PORT', 5000)
+    # In production (Railway), use PORT. Local fallback to BACKEND_PORT or 5000.
+    port = int(os.getenv('PORT', os.getenv('BACKEND_PORT', 5000)))
     debug = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
 
-    # Get check interval from environment or use default (30 minutes)
-    check_interval = int(os.getenv('INCREMENTAL_SCRAPING_INTERVAL', 30))
-    sync_interval = int(os.getenv('AUTO_SYNC_INTERVAL', 5)
-                        )  # Default 5 minutes
-
     logger.info(f'Starting ParseHub API Server on port {port}')
-    logger.info(
-        f'Starting Incremental Scraping Scheduler (check interval: {check_interval} minutes)')
-    logger.info(
-        f'Starting Auto-Sync Service (sync interval: {sync_interval} minutes)')
-
-    # Start the incremental scraping scheduler
-    start_incremental_scraping_scheduler(check_interval)
-
-    # Start the auto-sync service
-    start_auto_sync_service(sync_interval)
 
     try:
-        app.run(host='0.0.0.0', port=int(port), debug=debug)
+        app.run(host='0.0.0.0', port=port, debug=debug)
     finally:
         # Stop services on shutdown
         logger.info('Shutting down services...')
         stop_incremental_scraping_scheduler()
         stop_auto_sync_service()
         logger.info('Services stopped')
+
