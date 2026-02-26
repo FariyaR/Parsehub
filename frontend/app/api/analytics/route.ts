@@ -11,20 +11,20 @@ const BASE_URL = process.env.PARSEHUB_BASE_URL || 'https://www.parsehub.com/api/
 function parseCSV(csvText: string): any[] {
   const lines = csvText.trim().split('\n')
   if (lines.length === 0) return []
-  
+
   // Parse header
   const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''))
-  
+
   // Parse rows
   const records = []
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue
-    
+
     // Simple CSV parsing - handles quoted fields
     const values: string[] = []
     let current = ''
     let inQuotes = false
-    
+
     for (let j = 0; j < lines[i].length; j++) {
       const char = lines[i][j]
       if (char === '"') {
@@ -37,7 +37,7 @@ function parseCSV(csvText: string): any[] {
       }
     }
     values.push(current.trim().replace(/^"|"$/g, ''))
-    
+
     // Create record object
     const record: any = {}
     headers.forEach((header, index) => {
@@ -45,7 +45,7 @@ function parseCSV(csvText: string): any[] {
     })
     records.push(record)
   }
-  
+
   return records
 }
 
@@ -59,7 +59,7 @@ async function storeAnalyticsDataToDB(
 ): Promise<{ success: boolean; message: string; error?: string }> {
   try {
     console.log(`[DB STORE] Starting storage for project ${projectToken}, records: ${records.length}`)
-    
+
     const projectRoot = path.resolve(process.cwd(), '..')
     const backendDir = path.join(projectRoot, 'backend')
     const pythonExe = path.join(projectRoot, '.venv', 'Scripts', 'python.exe')
@@ -69,7 +69,7 @@ async function storeAnalyticsDataToDB(
       console.error(`[DB STORE] ${msg}`)
       return { success: false, message: msg, error: msg }
     }
-    
+
     if (!fs.existsSync(backendDir)) {
       const msg = `Backend dir not found at ${backendDir}`
       console.error(`[DB STORE] ${msg}`)
@@ -78,7 +78,7 @@ async function storeAnalyticsDataToDB(
 
     // Create a temporary JSON file with the data to store
     // Custom replacer to handle non-serializable objects
-    const jsonReplacer = (key: any, value: any) => {
+    const jsonReplacer = (_key: any, value: any) => {
       if (value instanceof Date) {
         return value.toISOString()
       }
@@ -91,6 +91,7 @@ async function storeAnalyticsDataToDB(
       return value
     }
 
+
     const dataToStore = {
       project_token: projectToken,
       run_token: runToken,
@@ -101,7 +102,7 @@ async function storeAnalyticsDataToDB(
 
     const tempFile = path.join(backendDir, `.analytics_temp_${projectToken}_${Date.now()}.json`)
     console.log(`[DB STORE] Writing temp file: ${tempFile}`)
-    
+
     try {
       const jsonString = JSON.stringify(dataToStore, jsonReplacer)
       if (!jsonString || jsonString.length === 0) {
@@ -113,7 +114,7 @@ async function storeAnalyticsDataToDB(
       console.error(`[DB STORE] JSON serialization error: ${errMsg}`)
       throw e
     }
-    
+
     const fileExists = fs.existsSync(tempFile)
     const fileSize = fileExists ? fs.statSync(tempFile).size : 0
     console.log(`[DB STORE] Temp file written: ${fileExists ? `verified (${fileSize} bytes)` : 'FAILED'}`)
@@ -223,13 +224,13 @@ if __name__ == '__main__':
         console.error(`[DB STORE] Failed to parse Python output as JSON: ${output}`)
         throw new Error(`Invalid JSON from Python: ${output.substring(0, 100)}`)
       }
-      
+
       if (result.success) {
         console.log(`✅ [DB STORE] SUCCESS: Data stored for ${projectToken}, records: ${result.records_stored}`)
       } else {
         console.error(`❌ [DB STORE] FAILED: ${result.error}`)
       }
-      
+
       // Clean up temp file
       try {
         if (fs.existsSync(tempFile)) {
@@ -239,7 +240,7 @@ if __name__ == '__main__':
       } catch (e) {
         console.warn(`[DB STORE] Cleanup warning:`, e instanceof Error ? e.message : e)
       }
-      
+
       return result
     } finally {
       try {
@@ -261,7 +262,7 @@ if __name__ == '__main__':
 async function getAnalyticsDataFromDB(projectToken: string): Promise<any> {
   try {
     console.log(`[DB RETRIEVE] Looking for cached data for ${projectToken}...`)
-    
+
     const projectRoot = path.resolve(process.cwd(), '..')
     const backendDir = path.join(projectRoot, 'backend')
     const pythonExe = path.join(projectRoot, '.venv', 'Scripts', 'python.exe')
@@ -270,7 +271,7 @@ async function getAnalyticsDataFromDB(projectToken: string): Promise<any> {
       console.log(`[DB RETRIEVE] Python exe not found`)
       return null
     }
-    
+
     if (!fs.existsSync(backendDir)) {
       console.log(`[DB RETRIEVE] Backend dir not found`)
       return null
@@ -346,12 +347,12 @@ if __name__ == '__main__':
       console.error(`[DB RETRIEVE] Failed to parse output as JSON: ${output}`)
       return null
     }
-    
+
     if (result.found === false) {
       console.log(`[DB RETRIEVE] No cached data found for ${projectToken}`)
       return null
     }
-    
+
     const recordCount = result.raw_data ? result.raw_data.length : 0
     console.log(`✅ [DB RETRIEVE] Retrieved cached data: ${recordCount} records for ${projectToken}`)
     return result
@@ -365,23 +366,23 @@ if __name__ == '__main__':
 async function fetchProjectDataFromParseHub(projectToken: string) {
   try {
     console.log(`Fetching data for project ${projectToken} from ParseHub...`)
-    
+
     // Get project info
     const projectResponse = await axios.get(`${BASE_URL}/projects/${projectToken}`, {
       params: { api_key: API_KEY },
       timeout: 15000,
     })
-    
+
     const project = projectResponse.data
     if (!project) return null
-    
+
     console.log(`Project found: ${project.title}, last_run status: ${project.last_run?.status}`)
-    
+
     // Get the last run's data
     if (project.last_run && project.last_run.run_token) {
       const runToken = project.last_run.run_token
       console.log(`Fetching data for run ${runToken}...`)
-      
+
       // Try to fetch CSV format first (preferred for data completeness)
       console.log(`Attempting CSV format...`)
       try {
@@ -390,16 +391,16 @@ async function fetchProjectDataFromParseHub(projectToken: string) {
           timeout: 15000,
           headers: { 'Accept-Encoding': 'gzip' },
         })
-        
+
         const csvText = csvResponse.data
         console.log(`CSV data fetched, parsing...`)
-        
+
         // Parse CSV to records
         const records = parseCSV(csvText)
         const totalRecords = records.length
-        
+
         console.log(`Parsed ${totalRecords} records from CSV`)
-        
+
         // Return data in analytics format
         return {
           overview: {
@@ -431,21 +432,21 @@ async function fetchProjectDataFromParseHub(projectToken: string) {
         }
       } catch (csvError) {
         console.log('CSV fetch failed, trying JSON...', csvError instanceof Error ? csvError.message : '')
-        
+
         // Fallback to JSON format
         const jsonResponse = await axios.get(`${BASE_URL}/runs/${runToken}/data`, {
           params: { api_key: API_KEY },
           timeout: 15000,
         })
-        
+
         const runData = jsonResponse.data
         console.log(`JSON data fetched`)
-        
+
         // Extract records from the response
         let records = []
         let totalRecords = 0
         let dataKeys = Object.keys(runData).filter(k => !['offset', 'brand'].includes(k))
-        
+
         // Look for array fields
         for (const key of dataKeys) {
           if (Array.isArray(runData[key])) {
@@ -455,7 +456,7 @@ async function fetchProjectDataFromParseHub(projectToken: string) {
             break
           }
         }
-        
+
         // Return data in analytics format
         return {
           overview: {
@@ -486,7 +487,7 @@ async function fetchProjectDataFromParseHub(projectToken: string) {
         }
       }
     }
-    
+
     return null
   } catch (error) {
     console.error('Error fetching from ParseHub:', error instanceof Error ? error.message : error)
@@ -498,22 +499,22 @@ async function fetchProjectDataFromParseHub(projectToken: string) {
 async function fetchAndStoreProjectData(projectToken: string) {
   try {
     console.log(`[FETCH_STORE] Fetching and storing data for project ${projectToken}...`)
-    
+
     // First try to get data from ParseHub
     let parseHubData = await fetchProjectDataFromParseHub(projectToken)
-    
+
     if (!parseHubData) {
       console.log(`[FETCH_STORE] ParseHub API unavailable or returned null`)
       return null
     }
-    
+
     console.log(`[FETCH_STORE] Got ParseHub data: ${parseHubData.overview?.total_records_scraped || 0} records`)
-    
+
     if (parseHubData) {
       // ✅ Store to database SYNCHRONOUSLY and wait for completion
       const recordsToStore = parseHubData.raw_data || []
       console.log(`[FETCH_STORE] Storing ${recordsToStore.length} records to database...`)
-      
+
       const storageResult = await storeAnalyticsDataToDB(
         projectToken,
         parseHubData.run_token || 'unknown',
@@ -521,7 +522,7 @@ async function fetchAndStoreProjectData(projectToken: string) {
         recordsToStore,
         parseHubData.csv_data
       )
-      
+
       // ✅ Verify storage succeeded BEFORE returning response
       if (storageResult.success) {
         console.log(`✅ [FETCH_STORE] Data successfully stored to database for ${projectToken}`)
@@ -529,7 +530,7 @@ async function fetchAndStoreProjectData(projectToken: string) {
         console.error(`❌ [FETCH_STORE] Database storage FAILED: ${storageResult.error}`)
         console.warn(`[FETCH_STORE] Returning data anyway, but data will be lost on next refresh!`)
       }
-      
+
       // Return with raw_data included for display
       const response = {
         overview: parseHubData.overview,
@@ -543,11 +544,11 @@ async function fetchAndStoreProjectData(projectToken: string) {
         stored: storageResult.success,
         storage_message: storageResult.message,
       }
-      
+
       console.log(`[FETCH_STORE] Returning response with ${recordsToStore.length} records`)
       return response
     }
-    
+
     return null
   } catch (error) {
     console.error(`❌ [FETCH_STORE] Exception:`, error instanceof Error ? error.message : error)
@@ -719,11 +720,11 @@ export async function GET(request: NextRequest) {
         getAnalyticsDataFromDB(token),
         new Promise<null>(resolve => setTimeout(() => resolve(null), 5000)) // 5 sec timeout
       ])
-      
+
       analytics = dbResult
       if (analytics && analytics.raw_data && analytics.raw_data.length > 0) {
         console.log(`✅ [API] Step 1 SUCCESS: Found ${analytics.raw_data.length} records in database`)
-        
+
         // Background update if force=true
         if (force) {
           console.log(`[API] Background: Queuing ParseHub update...`)
@@ -732,7 +733,7 @@ export async function GET(request: NextRequest) {
             console.warn(`[API] Background update failed (non-critical):`, err instanceof Error ? err.message : err)
           })
         }
-        
+
         return NextResponse.json(analytics)
       } else {
         console.log(`[API] Step 1: No valid data in database, continuing...`)
@@ -748,11 +749,11 @@ export async function GET(request: NextRequest) {
         // Use Promise.race with timeout for faster failure
         const result = await Promise.race([
           fetchAndStoreProjectData(token),
-          new Promise<null>((_, reject) => 
+          new Promise<null>((_, reject) =>
             setTimeout(() => reject(new Error('ParseHub request timeout')), 12000) // 12 sec timeout
           )
         ])
-        
+
         analytics = result
         if (analytics) {
           console.log(`✅ [API] Step 2 SUCCESS: Got data from ParseHub, stored=${(analytics as any).stored}`)
