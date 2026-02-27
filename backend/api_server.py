@@ -134,6 +134,8 @@ def ensure_services():
     returns 200 even when the database is completely unavailable.
     """
     g.request_id = uuid.uuid4().hex[:12]
+    # All routes that need the DB use g.db; get_db() is cheap (no connection until first use).
+    g.db = get_db()
     if request.path in ('/api/health', '/api/health/'):
         return
     if not _services_initialized:
@@ -147,9 +149,9 @@ def return_db_connection(exc=None):
     Fully guarded — must never raise under any circumstances.
     """
     try:
-        db = _db
-        if db is not None and getattr(db, 'use_postgres', False):
-            db.disconnect()   # returns raw_connection to SQLAlchemy pool
+        conn = g.get('db') or _db
+        if conn is not None and getattr(conn, 'use_postgres', False):
+            conn.disconnect()   # returns raw_connection to SQLAlchemy pool
     except Exception as e:
         logger.warning(f'[teardown] Error returning DB connection: {e}')
 
@@ -267,7 +269,7 @@ def start_monitoring():
             return jsonify({'error': 'Could not determine project_id'}), 400
 
         # Create monitoring session in database
-        session_id = db.create_monitoring_session(project_id, run_token, pages)
+        session_id = g.db.create_monitoring_session(project_id, run_token, pages)
 
         if not session_id:
             return jsonify({'error': 'Failed to create monitoring session'}), 500
@@ -275,7 +277,7 @@ def start_monitoring():
         # Start real-time monitoring in background
         # This will run the monitoring loop in the monitoring service
         try:
-            monitoring_service.monitor_run_realtime(
+            _monitoring_service.monitor_run_realtime(
                 project_id, run_token, pages)
         except Exception as e:
             logger.error(f'Error starting real-time monitoring: {e}')
@@ -315,9 +317,9 @@ def get_monitor_status():
 
         # Get session summary
         if session_id:
-            summary = db.get_session_summary(session_id)
+            summary = g.db.get_session_summary(session_id)
         else:  # project_id provided
-            summary = db.get_monitoring_status_for_project(project_id)
+            summary = g.db.get_monitoring_status_for_project(project_id)
 
         if not summary:
             return jsonify({'error': 'Monitoring session not found'}), 404
@@ -369,8 +371,8 @@ def get_monitor_data():
         offset = max(offset, 0)
 
         # Get records from database
-        records = db.get_session_records(session_id, limit, offset)
-        total = db.get_session_records_count(session_id)
+        records = g.db.get_session_records(session_id, limit, offset)
+        total = g.db.get_session_records_count(session_id)
 
         return jsonify({
             'success': True,
@@ -405,7 +407,7 @@ def get_monitor_data_csv():
             return jsonify({'error': 'Missing required parameter: session_id'}), 400
 
         # Get CSV data
-        csv_data = db.get_data_as_csv(session_id)
+        csv_data = g.db.get_data_as_csv(session_id)
 
         if not csv_data:
             return jsonify({'error': 'No records found for session'}), 404
@@ -444,8 +446,8 @@ def stop_monitoring():
 
         # Update session status to cancelled
         if session_id:
-            db.update_monitoring_session(session_id, status='cancelled')
-            summary = db.get_session_summary(session_id)
+            g.db.update_monitoring_session(session_id, status='cancelled')
+            summary = g.db.get_session_summary(session_id)
         else:
             # Find session by run_token (get most recent)
             # This would need a database method to find by run_token
@@ -553,7 +555,7 @@ def get_metadata():
         limit = int(request.args.get('limit', 100))
         offset = int(request.args.get('offset', 0))
 
-        records = db.get_metadata_filtered(
+        records = g.db.get_metadata_filtered(
             project_token=project_token,
             region=region,
             country=country,
@@ -582,7 +584,7 @@ def get_metadata_by_id(metadata_id):
         return jsonify({'error': 'Unauthorized'}), 401
 
     try:
-        record = db.get_metadata_by_id(metadata_id)
+        record = g.db.get_metadata_by_id(metadata_id)
 
         if not record:
             return jsonify({'error': 'Metadata not found'}), 404
@@ -615,7 +617,7 @@ def update_metadata(metadata_id):
     try:
         data = request.get_json()
 
-        success = db.update_metadata_progress(
+        success = g.db.update_metadata_progress(
             metadata_id,
             current_page_scraped=data.get('current_page_scraped'),
             current_product_scraped=data.get('current_product_scraped'),
@@ -625,7 +627,7 @@ def update_metadata(metadata_id):
         if not success:
             return jsonify({'error': 'Failed to update metadata'}), 500
 
-        record = db.get_metadata_by_id(metadata_id)
+        record = g.db.get_metadata_by_id(metadata_id)
 
         return jsonify({
             'success': True,
@@ -645,7 +647,7 @@ def delete_metadata(metadata_id):
         return jsonify({'error': 'Unauthorized'}), 401
 
     try:
-        success = db.delete_metadata(metadata_id)
+        success = g.db.delete_metadata(metadata_id)
 
         if not success:
             return jsonify({'error': 'Failed to delete metadata'}), 500
@@ -750,7 +752,7 @@ def get_import_history():
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
 
-        batches = db.get_import_batches(limit, offset)
+        batches = g.db.get_import_batches(limit, offset)
 
         return jsonify({
             'success': True,
@@ -782,7 +784,7 @@ def get_filter_values():
         if field not in ['region', 'country', 'brand']:
             return jsonify({'error': 'Invalid field. Must be: region, country, or brand'}), 400
 
-        values = db.get_distinct_filter_values(field)
+        values = g.db.get_distinct_filter_values(field)
 
         return jsonify({
             'success': True,
@@ -823,7 +825,7 @@ def batch_execute_runs():
         run_queue = []
 
         for metadata_id in metadata_ids:
-            metadata = db.get_metadata_by_id(metadata_id)
+            metadata = g.db.get_metadata_by_id(metadata_id)
 
             if not metadata:
                 logger.warning(f"Metadata {metadata_id} not found, skipping")
@@ -902,7 +904,7 @@ def get_projects():
                 f'[API] Filters detected - delegating to search logic: region={region}, country={country}, brand={brand}, website={website}')
             offset = (page - 1) * limit
 
-            result = db.get_projects_with_website_grouping(
+            result = g.db.get_projects_with_website_grouping(
                 limit=limit,
                 offset=offset,
                 region=region,
@@ -941,8 +943,8 @@ def get_projects():
         if page == 1:
             logger.info('[API] First page - syncing projects in background...')
             try:
-                sync_result = db.sync_projects(all_projects)
-                metadata_sync_result = db.sync_metadata_with_projects(
+                sync_result = g.db.sync_projects(all_projects)
+                metadata_sync_result = g.db.sync_metadata_with_projects(
                     all_projects)
                 logger.info(
                     f'[API] Sync result: {sync_result}, Metadata sync: {metadata_sync_result}')
@@ -972,7 +974,7 @@ def get_projects():
             f'[API] Paginated: {len(paginated_projects)} projects on page {page}')
 
         # Enrich paginated results with metadata
-        enriched_projects = db.match_projects_to_metadata_batch(
+        enriched_projects = g.db.match_projects_to_metadata_batch(
             paginated_projects)
         metadata_matches = sum(
             1 for p in enriched_projects if p.get('metadata'))
@@ -981,7 +983,7 @@ def get_projects():
         websites_dict = {}
         for proj in enriched_projects:
             title = proj.get('title', 'Unknown')
-            website = db.extract_website_from_title(title)
+            website = g.db.extract_website_from_title(title)
 
             if website not in websites_dict:
                 websites_dict[website] = {
@@ -1045,13 +1047,13 @@ def get_projects_bulk():
         logger.info(f'[API] Retrieved {len(projects)} projects from cache/API')
 
         # Persist project list and refresh metadata links
-        sync_result = db.sync_projects(projects)
-        metadata_sync_result = db.sync_metadata_with_projects(projects)
+        sync_result = g.db.sync_projects(projects)
+        metadata_sync_result = g.db.sync_metadata_with_projects(projects)
         logger.info(
             f'[API] Sync result: {sync_result}, Metadata sync: {metadata_sync_result}')
 
         # Enrich projects with metadata in batch
-        projects = db.match_projects_to_metadata_batch(projects)
+        projects = g.db.match_projects_to_metadata_batch(projects)
         metadata_matches = sum(1 for p in projects if p.get('metadata'))
         logger.info(
             f'[API] Matched {metadata_matches}/{len(projects)} projects with metadata')
@@ -1060,7 +1062,7 @@ def get_projects_bulk():
         websites_dict = {}
         for proj in projects:
             title = proj.get('title', 'Unknown')
-            website = db.extract_website_from_title(title)
+            website = g.db.extract_website_from_title(title)
 
             if website not in websites_dict:
                 websites_dict[website] = {
@@ -1121,8 +1123,8 @@ def sync_projects():
             return jsonify({'error': 'Failed to fetch projects from API'}), 500
 
         # Sync to database
-        result = db.sync_projects(projects)
-        metadata_sync_result = db.sync_metadata_with_projects(projects)
+        result = g.db.sync_projects(projects)
+        metadata_sync_result = g.db.sync_metadata_with_projects(projects)
 
         logger.info(f'[API] Project sync complete: {result}')
         logger.info(f'[API] Metadata sync complete: {metadata_sync_result}')
@@ -1167,7 +1169,7 @@ def search_projects():
             f'[API] Searching projects - region:{region}, country:{country}, brand:{brand}, website:{website}, group:{group_by_website}')
 
         # Get projects with filters and website grouping
-        result = db.get_projects_with_website_grouping(
+        result = g.db.get_projects_with_website_grouping(
             limit=limit,
             offset=offset,
             region=region,
@@ -1216,10 +1218,10 @@ def get_filters():
         logger.info('[API] Getting filter options...')
 
         filters = {
-            'regions': db.get_distinct_metadata_values('region'),
-            'countries': db.get_distinct_metadata_values('country'),
-            'brands': db.get_distinct_metadata_values('brand'),
-            'websites': db.get_distinct_project_websites()
+            'regions': g.db.get_distinct_metadata_values('region'),
+            'countries': g.db.get_distinct_metadata_values('country'),
+            'brands': g.db.get_distinct_metadata_values('brand'),
+            'websites': g.db.get_distinct_project_websites()
         }
 
         logger.info(
@@ -1245,19 +1247,19 @@ def get_project_details(token: str):
         logger.info(f'[API] Fetching project details: token={token}')
 
         # Get project from database
-        project = db.get_project_by_token(token)
+        project = g.db.get_project_by_token(token)
 
         if not project:
             logger.warning(f'[API] Project not found: {token}')
             return jsonify({'error': 'Project not found', 'success': False}), 404
 
         # Get metadata for this project
-        metadata = db.get_metadata_by_project_token(token)
+        metadata = g.db.get_metadata_by_project_token(token)
 
         # Get run statistics for this project
         run_stats = None
         if project.get('id'):
-            run_stats = db.get_project_run_stats(project['id'])
+            run_stats = g.db.get_project_run_stats(project['id'])
 
         response_data = {
             'success': True,
@@ -1312,7 +1314,7 @@ def run_project(token: str):
         pages = max(1, int(data.get('pages', 1)))
 
         # CHECK: Get metadata to see if we're already at or near total pages
-        metadata = db.get_metadata_by_project_token(token)
+        metadata = g.db.get_metadata_by_project_token(token)
 
         if metadata:
             total_pages = metadata.get('total_pages')
@@ -1494,7 +1496,7 @@ def ingest_project_data(project_token: str):
 
         # Get project ID from database
         db = ParseHubDatabase()
-        project_id = db.get_project_id_by_token(project_token)
+        project_id = g.db.get_project_id_by_token(project_token)
 
         if not project_id:
             logger.error(f'[API] Project not found: {project_token}')
@@ -1508,7 +1510,7 @@ def ingest_project_data(project_token: str):
         logger.info(f'[API] ✅ Data ingestion complete: {result}')
 
         # Get stats
-        stats = db.get_product_data_stats(project_id)
+        stats = g.db.get_product_data_stats(project_id)
 
         return jsonify({
             'success': True,
@@ -1535,7 +1537,7 @@ def get_product_data(project_id: int):
         offset = int(request.args.get('offset', 0))
 
         db = ParseHubDatabase()
-        products = db.get_product_data_by_project(
+        products = g.db.get_product_data_by_project(
             project_id, limit=limit, offset=offset)
 
         return jsonify({
@@ -1558,7 +1560,7 @@ def get_product_data_by_run(run_token: str):
         limit = min(int(request.args.get('limit', 1000)), 5000)
 
         db = ParseHubDatabase()
-        products = db.get_product_data_by_run(run_token, limit=limit)
+        products = g.db.get_product_data_by_run(run_token, limit=limit)
 
         return jsonify({
             'success': True,
@@ -1577,7 +1579,7 @@ def get_product_stats(project_id: int):
     """Get statistics about product data for a project"""
     try:
         db = ParseHubDatabase()
-        stats = db.get_product_data_stats(project_id)
+        stats = g.db.get_product_data_stats(project_id)
 
         return jsonify({
             'success': True,
@@ -1600,7 +1602,7 @@ def export_product_data(project_id: int):
 
         # Generate export file
         output_path = f"product_export_project_{project_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        export_file = db.export_product_data_csv(project_id, output_path)
+        export_file = g.db.export_product_data_csv(project_id, output_path)
 
         if not export_file:
             return jsonify({'error': 'No data to export'}), 404
@@ -1703,7 +1705,7 @@ def get_scraping_status(project_id: int):
     Shows total pages vs pages scraped
     """
     try:
-        conn = db.connect()
+        conn = g.db.connect()
         cursor = conn.cursor()
 
         # Get metadata for project
@@ -1800,7 +1802,7 @@ def get_incomplete_projects():
     Get list of all projects that have incomplete scraping
     """
     try:
-        conn = db.connect()
+        conn = g.db.connect()
         cursor = conn.cursor()
 
         # Get projects with incomplete scraping
