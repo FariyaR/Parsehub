@@ -5,6 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
+import threading
 
 # Optional PostgreSQL support
 try:
@@ -24,8 +25,10 @@ except ImportError:
 
 # Load environment variables from .env files
 dotenv_path = Path(__file__).parent / ".env"
-load_dotenv(dotenv_path)
-load_dotenv()
+if dotenv_path.exists():
+    load_dotenv(dotenv_path)
+else:
+    load_dotenv()
 
 
 
@@ -35,6 +38,8 @@ class ParseHubDatabase:
         self.db_url = os.getenv('DATABASE_URL')
         self.use_postgres = bool(self.db_url and POSTGRES_AVAILABLE)
         
+        self._local = threading.local()
+
         if self.use_postgres:
             print(f"Using PostgreSQL database: {self.db_url.split('@')[-1]}")
         else:
@@ -50,6 +55,14 @@ class ParseHubDatabase:
 
         self.conn = None
         self.init_db()
+
+    @property
+    def conn(self):
+        return getattr(self._local, 'conn', None)
+
+    @conn.setter
+    def conn(self, value):
+        self._local.conn = value
 
     def _get_connection(self):
         """Get a new database connection based on type"""
@@ -158,18 +171,34 @@ class ParseHubDatabase:
 
 
     def connect(self):
-        """Connect to database"""
+        """Connect to or return existing database connection"""
+        if getattr(self._local, 'conn', None):
+            # Test if connection is alive
+            try:
+                if self.use_postgres:
+                    # Quick ping for Postgres
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT 1")
+                    # psycopg2 might need explicitly calling commit or closing cursor
+                    if hasattr(cursor, 'close'): cursor.close()
+                return self.conn
+            except Exception:
+                # Connection is dead
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                self.conn = None
+                
+        # Create new connection
         self.conn = self._get_connection()
         return self.conn
 
     def disconnect(self):
         """Close database connection"""
-        if self.conn:
-            try:
-                self.conn.close()
-            except:
-                pass
-            self.conn = None
+        # We now keep the connection alive per-thread to prevent connection leaks
+        # and limit the total number of connections to the number of workers.
+        pass
 
     def init_db(self):
         """Initialize database schema"""
