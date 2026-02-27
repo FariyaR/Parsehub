@@ -1,1 +1,1 @@
-web: gunicorn api_server:app --workers 2 --threads 2 --worker-class gthread --timeout 120 --keep-alive 5 --bind "0.0.0.0:${PORT:-5000}" --log-level info --access-logfile - --error-logfile -
+web: gunicorn api_server:app --bind 0.0.0.0:$PORT --workers 1 --log-level debug

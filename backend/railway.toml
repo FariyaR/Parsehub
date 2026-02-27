@@ -17,7 +17,7 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "gunicorn api_server:app --workers 2 --threads 2 --worker-class gthread --timeout 120 --keep-alive 5 --bind 0.0.0.0:$PORT --log-level info --access-logfile - --error-logfile -"
+startCommand = "gunicorn api_server:app --bind 0.0.0.0:$PORT --workers 1 --log-level debug"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
