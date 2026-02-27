@@ -2,18 +2,25 @@
  * _proxy.ts — Central server-side proxy utility
  *
  * All Next.js API route handlers call `proxyToBackend()` from here.
- * The browser NEVER calls the Flask domain directly — it only ever hits
- * /api/* on the same Next.js origin, eliminating CORS entirely.
+ * Browser never touches the Flask domain — only hits same-origin /api/*.
  *
  * BACKEND_API_URL is a server-only env var (no NEXT_PUBLIC prefix).
- * It is never baked into the client bundle.
+ *
+ * Error surface:
+ *   502 - Flask is down, ECONNREFUSED, or network unreachable
+ *   503 - Flask booted but DB is not ready (returned by /api/health/db)
+ *   504 - Request timed out
+ *   5xx - Flask returned an error itself (forwarded as-is)
+ *
+ * All errors return a clean JSON { error, backend_status, details } payload
+ * so the frontend can display a meaningful message.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 
 const TIMEOUT_MS = 30_000;
 
-// ─── Backend URL resolution ────────────────────────────────────────────────
+// ── Backend URL resolution ─────────────────────────────────────────────────
 function getBackendUrl(): string {
     const url =
         process.env.BACKEND_API_URL ||
@@ -38,20 +45,54 @@ function getBackendUrl(): string {
         }
     }
 
-    return url.replace(/\/$/, ''); // strip trailing slash
+    return url.replace(/\/$/, '');
 }
 
 const BACKEND_BASE = getBackendUrl();
 const BACKEND_API_KEY = process.env.BACKEND_API_KEY || 't_hmXetfMCq3';
 
-// ─── Core proxy function ───────────────────────────────────────────────────
+// ── Helper: build error payload ────────────────────────────────────────────
+function backendError(
+    message: string,
+    status: number,
+    details?: string,
+    backendStatus?: number
+): NextResponse {
+    return NextResponse.json(
+        {
+            error: message,
+            backend_status: backendStatus ?? null,
+            details: details ?? null,
+            backend_url: BACKEND_BASE,   // helps debug Railway config issues
+        },
+        { status }
+    );
+}
+
+// ── Helper: check Flask health before surfacing opaque 502s ───────────────
+async function checkBackendHealth(): Promise<{ ok: boolean; detail: string }> {
+    try {
+        const res = await fetch(`${BACKEND_BASE}/api/health`, {
+            headers: { Authorization: `Bearer ${BACKEND_API_KEY}` },
+            signal: AbortSignal.timeout(5_000),
+        });
+        if (res.ok) return { ok: true, detail: 'ok' };
+        return { ok: false, detail: `Flask /api/health returned ${res.status}` };
+    } catch (e) {
+        return {
+            ok: false,
+            detail: e instanceof Error ? e.message : String(e),
+        };
+    }
+}
+
+// ── Core proxy function ────────────────────────────────────────────────────
 /**
  * Forward a Next.js route request to the Flask backend.
  *
- * @param request  - The incoming NextRequest
- * @param backendPath - Path on the Flask backend, e.g. "/api/projects"
- * @param queryOverrides - Optional URLSearchParams to use instead of the
- *                         request's own search params
+ * @param request        - Incoming NextRequest
+ * @param backendPath    - Path on Flask, e.g. "/api/projects"
+ * @param queryOverrides - Optional URLSearchParams (replaces request search params)
  */
 export async function proxyToBackend(
     request: NextRequest,
@@ -65,7 +106,7 @@ export async function proxyToBackend(
     const method = request.method.toUpperCase();
     console.log(`[proxy] ${method} ${request.nextUrl.pathname} → ${targetUrl}`);
 
-    // Forward the request body for mutating methods
+    // Forward body for mutating methods
     let body: string | undefined;
     if (!['GET', 'HEAD', 'DELETE'].includes(method)) {
         try {
@@ -75,7 +116,6 @@ export async function proxyToBackend(
         }
     }
 
-    // Build outgoing headers
     const outgoingHeaders: Record<string, string> = {
         'Authorization': `Bearer ${BACKEND_API_KEY}`,
         'Content-Type': 'application/json',
@@ -95,26 +135,34 @@ export async function proxyToBackend(
 
         clearTimeout(timer);
 
-        // Try to parse JSON; fall back to text
+        // Parse response body
         const contentType = backendResponse.headers.get('content-type') ?? '';
         let responseData: unknown;
         if (contentType.includes('application/json')) {
             responseData = await backendResponse.json();
         } else {
-            responseData = { raw: await backendResponse.text() };
+            const raw = await backendResponse.text();
+            responseData = { raw };
         }
 
         if (!backendResponse.ok) {
-            console.error(
-                `[proxy] Backend returned ${backendResponse.status} for ${targetUrl}`
-            );
-            return NextResponse.json(
-                {
-                    error: (responseData as Record<string, string>)?.error ??
-                        `Backend error ${backendResponse.status}`,
-                },
-                { status: backendResponse.status }
-            );
+            const errMsg =
+                (responseData as Record<string, string>)?.error ??
+                `Backend returned ${backendResponse.status}`;
+
+            console.error(`[proxy] ${backendResponse.status} from ${targetUrl}: ${errMsg}`);
+
+            // Special: 503 means Flask is up but DB is not ready
+            if (backendResponse.status === 503) {
+                return backendError(
+                    'Database is not ready. The backend is booting — please retry in a moment.',
+                    503,
+                    errMsg,
+                    503
+                );
+            }
+
+            return backendError(errMsg, backendResponse.status, undefined, backendResponse.status);
         }
 
         return NextResponse.json(responseData, { status: backendResponse.status });
@@ -122,21 +170,36 @@ export async function proxyToBackend(
     } catch (err: unknown) {
         clearTimeout(timer);
 
-        if (err instanceof Error && err.name === 'AbortError') {
+        // Timeout
+        if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
             console.error(`[proxy] Timeout after ${TIMEOUT_MS}ms for ${targetUrl}`);
-            return NextResponse.json(
-                { error: 'Backend request timed out. Please try again.' },
-                { status: 504 }
+            return backendError(
+                'Backend request timed out. The server may be overloaded — please retry.',
+                504
             );
         }
 
-        console.error(`[proxy] Network error reaching ${targetUrl}:`, err);
-        return NextResponse.json(
-            {
-                error: 'Backend is unreachable. Check BACKEND_API_URL and ensure the Flask service is running.',
-                details: err instanceof Error ? err.message : String(err),
-            },
-            { status: 502 }
+        // Network error (ECONNREFUSED, ENOTFOUND, etc.)
+        // Query /api/health to distinguish "Flask is down" vs "transient error"
+        const health = await checkBackendHealth();
+        const detail = err instanceof Error ? err.message : String(err);
+
+        console.error(`[proxy] Network error for ${targetUrl}:`, detail);
+        console.error(`[proxy] Flask health check: ${health.detail}`);
+
+        if (!health.ok) {
+            return backendError(
+                'Flask backend is unreachable. It may still be booting on Railway.',
+                502,
+                health.detail
+            );
+        }
+
+        // Flask is alive but this specific request failed
+        return backendError(
+            'Backend request failed. Please try again.',
+            502,
+            detail
         );
     }
 }

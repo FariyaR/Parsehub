@@ -1,243 +1,275 @@
 """
-db_pool.py — Centralized PostgreSQL connection pool for Flask / Gunicorn.
+db_pool.py — SQLAlchemy-backed connection pool for Flask / Gunicorn.
 
-Architecture
-------------
-* One process-level pool per Gunicorn worker (created lazily on first use).
-* pg8000 is used as the driver; psycopg2 is preferred when available.
-* Pool is sized to 2 connections per worker to stay well under Railway's
-  default limit of 100 (e.g. 4 workers × 2 connections = 8 total).
-* Each request borrows a connection, uses it, and returns it to the pool.
-* If the pool is exhausted the request waits up to POOL_TIMEOUT seconds
-  before raising a clear error rather than crashing the worker.
+Strategy
+--------
+We use SQLAlchemy's QueuePool *only for connection management* — not as an ORM.
+`engine.raw_connection()` returns a real DBAPI connection (psycopg2 or pg8000)
+that the existing ParseHubDatabase cursor code can use without modification.
 
-Why this fixes "sorry, too many clients already"
--------------------------------------------------
-Before: each ParseHubDatabase() instantiation called connect() immediately at
-        module import time. Gunicorn forks N workers; each worker imports the
-        module → N × 3+ connections opened on boot, exhausting the limit.
+This gives us:
+  • pool_size        – connections kept open permanently per worker
+  • max_overflow     – extra connections allowed under burst load
+  • pool_timeout     – seconds to wait before raising "pool exhausted"
+  • pool_recycle     – close & reopen connections older than N seconds
+  • pool_pre_ping    – test connection before handing it out (prevents stale conn bugs)
 
-After:  The pool is only created lazily (on the first actual HTTP request).
-        No connections open at import time.  The pool has a hard cap so the
-        total connections across all workers stay within Railway's limit.
+Connection math for Railway (100-connection limit)
+---------------------------------------------------
+  2 workers × (pool_size=2 + max_overflow=1) = 6 total connections
+  With generous headroom: 94 free connections for other processes / Railway internals.
+
+Zero connections at import time
+--------------------------------
+The engine is created lazily inside get_engine(), called only when the first
+actual HTTP request arrives.  Gunicorn workers that fork will each create
+their own engine independently (forking a live engine would corrupt the pool).
 """
 
 import os
-import threading
-import queue
 import logging
+import threading
 from contextlib import contextmanager
-from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
-# ── Pool configuration (tune via environment variables) ──────────────────────
-POOL_SIZE      = int(os.getenv('DB_POOL_SIZE', '2'))      # connections per worker
-POOL_TIMEOUT   = float(os.getenv('DB_POOL_TIMEOUT', '10')) # seconds to wait for a conn
-DB_URL         = os.getenv('DATABASE_URL', '')
+# ── Pool Configuration (tune via Railway env vars) ─────────────────────────────
+_POOL_SIZE     = int(os.getenv('DB_POOL_SIZE',     '2'))   # permanent connections
+_MAX_OVERFLOW  = int(os.getenv('DB_MAX_OVERFLOW',  '1'))   # burst connections
+_POOL_TIMEOUT  = int(os.getenv('DB_POOL_TIMEOUT',  '10'))  # wait timeout (seconds)
+_POOL_RECYCLE  = int(os.getenv('DB_POOL_RECYCLE',  '300')) # recycle after 5 minutes
+_POOL_PRE_PING = True                                       # always test before use
+
+# ── Globals ────────────────────────────────────────────────────────────────────
+_engine = None
+_engine_lock = threading.Lock()
 
 
-def _detect_driver():
+def _build_engine_url(database_url: str) -> str:
+    """
+    Translate any postgres:// or postgresql+pg8000:// URL into the correct
+    SQLAlchemy dialect URL.
+
+    Priority:
+    1. If psycopg2 is importable → use postgresql+psycopg2://
+    2. Otherwise                 → use postgresql+pg8000://
+    """
     try:
         import psycopg2  # noqa: F401
-        return 'psycopg2'
+        driver = 'psycopg2'
     except ImportError:
-        pass
-    try:
-        import pg8000  # noqa: F401
-        return 'pg8000'
-    except ImportError:
-        return None
+        driver = 'pg8000'
+
+    parsed = urlparse(database_url)
+    # Replace scheme — keep everything else
+    scheme = f'postgresql+{driver}'
+    new_url = urlunparse((scheme, parsed.netloc, parsed.path,
+                          parsed.params, parsed.query, parsed.fragment))
+    return new_url
 
 
-DRIVER = _detect_driver()
-
-
-def _open_raw_connection():
-    """Open a brand-new connection to PostgreSQL."""
-    if not DB_URL:
-        raise RuntimeError(
-            'DATABASE_URL is not set. '
-            'Add it to your Railway backend service → Variables.'
-        )
-
-    if DRIVER == 'psycopg2':
-        import psycopg2
-        conn = psycopg2.connect(DB_URL)
-        conn.autocommit = True
-        return conn
-
-    if DRIVER == 'pg8000':
-        import pg8000
-        url = urlparse(DB_URL)
-        conn = pg8000.connect(
-            user=url.username,
-            password=url.password,
-            host=url.hostname,
-            port=url.port or 5432,
-            database=url.path.lstrip('/'),
-        )
-        conn.autocommit = True
-        return conn
-
-    raise RuntimeError(
-        'No PostgreSQL driver found. '
-        'Install psycopg2-binary or pg8000 (already in requirements.txt).'
-    )
-
-
-def _is_alive(conn) -> bool:
-    """Cheap health-check for a pooled connection."""
-    try:
-        if DRIVER == 'psycopg2':
-            conn.cursor().execute('SELECT 1')
-        else:
-            conn.run('SELECT 1')
-        return True
-    except Exception:
-        return False
-
-
-class ConnectionPool:
+def get_engine():
     """
-    A minimal, thread-safe connection pool backed by a Queue.
+    Return the process-level SQLAlchemy engine, creating it on first call.
 
-    * `get()` → borrows a healthy connection (blocks up to POOL_TIMEOUT).
-    * `put(conn)` → returns it; closes and replaces broken connections.
-    * `close_all()` → drains the pool (call on worker shutdown).
+    IMPORTANT: Never call this at module import time.
+    Call it only inside a request handler or the lazy initializer.
     """
+    global _engine
+    if _engine is not None:
+        return _engine
 
-    def __init__(self, size: int = POOL_SIZE):
-        self._size  = size
-        self._pool: queue.Queue = queue.Queue(maxsize=size)
-        self._lock  = threading.Lock()
-        self._count = 0   # total connections ever created (≤ size)
-        self._initialized = False
+    with _engine_lock:
+        if _engine is not None:   # double-check after acquiring lock
+            return _engine
 
-    def _ensure_initialized(self):
-        """Fill the pool on first use (lazy — no connections at import time)."""
-        if self._initialized:
-            return
-        with self._lock:
-            if self._initialized:
-                return
-            for _ in range(self._size):
-                try:
-                    conn = _open_raw_connection()
-                    self._pool.put_nowait(conn)
-                    self._count += 1
-                except Exception as exc:
-                    logger.warning(f'[pool] Could not pre-fill connection: {exc}')
-            self._initialized = True
-            logger.info(
-                f'[pool] Initialized with {self._pool.qsize()}/{self._size} connections '
-                f'(driver={DRIVER})'
-            )
-
-    def get(self):
-        """Borrow a connection from the pool."""
-        self._ensure_initialized()
-        try:
-            conn = self._pool.get(timeout=POOL_TIMEOUT)
-        except queue.Empty:
+        db_url = os.getenv('DATABASE_URL', '')
+        if not db_url:
             raise RuntimeError(
-                f'[pool] No connection available after {POOL_TIMEOUT}s. '
-                'Consider increasing DB_POOL_SIZE or reducing worker count.'
+                '[db_pool] DATABASE_URL is not set. '
+                'Add it to Railway → backend service → Variables.'
             )
 
-        # Replace dead connections silently
-        if not _is_alive(conn):
-            logger.warning('[pool] Stale connection detected, replacing...')
-            try:
-                conn.close()
-            except Exception:
-                pass
-            conn = _open_raw_connection()
+        # Validate production safety
+        if os.getenv('NODE_ENV') == 'production' or os.getenv('RAILWAY_ENVIRONMENT'):
+            lower = db_url.lower()
+            if 'localhost' in lower or '127.0.0.1' in lower:
+                raise RuntimeError(
+                    f'[db_pool] DATABASE_URL points to localhost in production: {db_url}'
+                )
 
-        return conn
-
-    def put(self, conn, broken: bool = False):
-        """Return a connection to the pool (or discard if broken)."""
-        if broken:
-            try:
-                conn.close()
-            except Exception:
-                pass
-            # Spin up a replacement so the pool stays full
-            try:
-                conn = _open_raw_connection()
-            except Exception as exc:
-                logger.error(f'[pool] Could not replace broken connection: {exc}')
-                return
         try:
-            self._pool.put_nowait(conn)
-        except queue.Full:
-            # Pool is full (shouldn't happen but be safe)
-            try:
-                conn.close()
-            except Exception:
-                pass
+            from sqlalchemy import create_engine, event
+            from sqlalchemy.pool import QueuePool
 
-    def close_all(self):
-        """Drain and close every connection in the pool."""
-        while not self._pool.empty():
-            try:
-                conn = self._pool.get_nowait()
-                conn.close()
-            except Exception:
-                pass
-        self._initialized = False
-        logger.info('[pool] All connections closed.')
+            sa_url = _build_engine_url(db_url)
+            logger.info(f'[db_pool] Creating engine (driver={sa_url.split("+")[1].split(":")[0]})')
+
+            engine = create_engine(
+                sa_url,
+                poolclass=QueuePool,
+                pool_size=_POOL_SIZE,
+                max_overflow=_MAX_OVERFLOW,
+                pool_timeout=_POOL_TIMEOUT,
+                pool_recycle=_POOL_RECYCLE,
+                pool_pre_ping=_POOL_PRE_PING,
+                connect_args={
+                    'connect_timeout': 10,  # fail fast if PG is unreachable
+                },
+            )
+
+            # Verify connectivity at startup (one connection, then returned to pool)
+            with engine.connect() as probe:
+                probe.execute(__import__('sqlalchemy').text('SELECT 1'))
+            logger.info(
+                f'[db_pool] Engine ready: pool_size={_POOL_SIZE}, '
+                f'max_overflow={_MAX_OVERFLOW}'
+            )
+
+            _engine = engine
+        except ImportError:
+            # SQLAlchemy not installed — fall back to bare psycopg2 / pg8000
+            logger.warning('[db_pool] SQLAlchemy not found, using fallback bare pool')
+            _engine = _build_fallback_pool(db_url)
+
+    return _engine
 
 
-# ── Module-level singleton ────────────────────────────────────────────────────
-# One pool per Gunicorn worker process.  Forking creates independent pools.
-_pool: Optional[ConnectionPool] = None
-_pool_lock = threading.Lock()
-
-
-def get_pool() -> ConnectionPool:
-    """Return the process-level pool, creating it on first call."""
-    global _pool
-    if _pool is None:
-        with _pool_lock:
-            if _pool is None:
-                _pool = ConnectionPool(size=POOL_SIZE)
-    return _pool
-
+# ── Raw DBAPI connection helpers ───────────────────────────────────────────────
 
 @contextmanager
 def get_db_connection():
     """
-    Context manager: borrow a connection, yield it, always return it.
+    Context manager — borrow a raw DBAPI connection from the pool.
 
-    Usage in a route:
+    The connection has autocommit=True to match the existing ParseHubDatabase
+    behaviour.  It is returned to the pool when the `with` block exits.
+
+    Usage:
         from db_pool import get_db_connection
         with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(...)
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
     """
-    pool = get_pool()
-    conn = pool.get()
-    broken = False
-    try:
-        yield conn
-    except Exception:
-        broken = True
-        raise
-    finally:
-        pool.put(conn, broken=broken)
+    engine = get_engine()
+
+    # SQLAlchemy engine
+    if hasattr(engine, 'raw_connection'):
+        raw = engine.raw_connection()
+        raw.autocommit = True
+        broken = False
+        try:
+            yield raw
+        except Exception:
+            broken = True
+            raise
+        finally:
+            try:
+                raw.close()   # returns to pool (not a real close)
+            except Exception:
+                pass
+
+    # Fallback bare pool
+    else:
+        with engine.get_connection() as conn:
+            yield conn
 
 
 def ping_db() -> bool:
-    """Quick DB health check — returns True if reachable."""
+    """Quick DB health-check — returns True if reachable."""
     try:
-        with get_db_connection() as conn:
-            if DRIVER == 'psycopg2':
-                conn.cursor().execute('SELECT 1')
-            else:
-                conn.run('SELECT 1')
+        from sqlalchemy import text
+        engine = get_engine()
+        if hasattr(engine, 'raw_connection'):
+            with engine.connect() as conn:
+                conn.execute(text('SELECT 1'))
+            return True
+        # fallback pool
+        with engine.get_connection() as conn:
+            conn.cursor().execute('SELECT 1')
         return True
-    except Exception:
+    except Exception as exc:
+        logger.warning(f'[db_pool] ping_db failed: {exc}')
         return False
+
+
+# ── Fallback bare pool (no SQLAlchemy) ────────────────────────────────────────
+
+class _BarePool:
+    """Minimal thread-safe pool used only when SQLAlchemy is unavailable."""
+
+    import queue as _queue_mod
+
+    def __init__(self, db_url: str, size: int):
+        import queue
+        self._q: queue.Queue = queue.Queue(maxsize=size)
+        self._lock = threading.Lock()
+        self._db_url = db_url
+        self._size = size
+        self._filled = False
+
+    def _connect(self):
+        parsed = urlparse(self._db_url)
+        try:
+            import psycopg2
+            c = psycopg2.connect(self._db_url)
+            c.autocommit = True
+            return c
+        except ImportError:
+            import pg8000
+            c = pg8000.connect(
+                user=parsed.username, password=parsed.password,
+                host=parsed.hostname, port=parsed.port or 5432,
+                database=parsed.path.lstrip('/'),
+            )
+            c.autocommit = True
+            return c
+
+    def _ensure_filled(self):
+        if self._filled:
+            return
+        with self._lock:
+            if self._filled:
+                return
+            for _ in range(self._size):
+                try:
+                    self._q.put_nowait(self._connect())
+                except Exception as e:
+                    logger.warning(f'[bare_pool] pre-fill failed: {e}')
+            self._filled = True
+
+    @contextmanager
+    def get_connection(self):
+        self._ensure_filled()
+        import queue
+        try:
+            conn = self._q.get(timeout=_POOL_TIMEOUT)
+        except queue.Empty:
+            conn = self._connect()
+        broken = False
+        try:
+            yield conn
+        except Exception:
+            broken = True
+            raise
+        finally:
+            if broken:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                try:
+                    self._q.put_nowait(self._connect())
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._q.put_nowait(conn)
+                except Exception:
+                    pass
+
+
+def _build_fallback_pool(db_url: str) -> '_BarePool':
+    pool = _BarePool(db_url, size=_POOL_SIZE)
+    return pool

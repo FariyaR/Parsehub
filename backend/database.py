@@ -174,44 +174,44 @@ class ParseHubDatabase:
 
 
     def connect(self):
-        """Connect to or return existing database connection.
-        
-        For PostgreSQL → borrow from the module-level connection pool.
-        For SQLite     → use a thread-local connection (unchanged behaviour).
+        """Obtain a database connection.
+
+        PostgreSQL → borrow a raw DBAPI connection from the SQLAlchemy pool
+                     (pool_size, max_overflow, pool_pre_ping all handled by SQLAlchemy).
+        SQLite     → thread-local connection (unchanged).
         """
         if self.use_postgres:
-            # Borrow from pool; caller is responsible for returning it.
-            # For backwards compatibility we also cache it on the thread local
-            # so that cursor() works without needing `with get_db_connection()`.
-            if not getattr(self._shared_local, 'conn', None):
+            # Reuse the thread-local connection for the duration of a request.
+            # teardown_appcontext calls disconnect() which returns it to the pool.
+            if getattr(self._shared_local, 'conn', None) is None:
                 try:
-                    from db_pool import get_pool
-                    pool = get_pool()
-                    self._shared_local.conn = pool.get()
-                    self._shared_local._pool_ref = pool  # keep ref for return
+                    from db_pool import get_engine
+                    engine = get_engine()
+                    # raw_connection() borrows from the pool; calling .close() returns it.
+                    conn = engine.raw_connection()
+                    conn.autocommit = True
+                    self._shared_local.conn = conn
                 except Exception as exc:
-                    raise RuntimeError(f'[DB] Cannot obtain PostgreSQL connection: {exc}') from exc
+                    raise RuntimeError(
+                        f'[DB] Cannot obtain PostgreSQL connection from pool: {exc}'
+                    ) from exc
             else:
-                # Test if still alive
+                # pool_pre_ping handles stale detection inside SQLAlchemy;
+                # do a cheap check here for belt-and-suspenders.
                 try:
                     cur = self._shared_local.conn.cursor()
                     cur.execute('SELECT 1')
+                    if hasattr(cur, 'close'):
+                        cur.close()
                 except Exception:
-                    # Return dead connection, get a fresh one
+                    # Connection is dead — close it (pool will replace it)
                     try:
-                        self._shared_local._pool_ref.put(
-                            self._shared_local.conn, broken=True
-                        )
+                        self._shared_local.conn.close()
                     except Exception:
                         pass
                     self._shared_local.conn = None
-                    try:
-                        from db_pool import get_pool
-                        pool = get_pool()
-                        self._shared_local.conn = pool.get()
-                        self._shared_local._pool_ref = pool
-                    except Exception as exc:
-                        raise RuntimeError(f'[DB] Cannot replace stale connection: {exc}') from exc
+                    # Recurse once to get a fresh connection
+                    return self.connect()
             return self._shared_local.conn
 
         # SQLite — unchanged thread-local behaviour
@@ -231,20 +231,22 @@ class ParseHubDatabase:
 
 
     def disconnect(self):
-        """Return the PostgreSQL connection to the pool, or close SQLite connection."""
+        """Return the connection to the SQLAlchemy pool (PostgreSQL)
+        or keep the thread-local alive (SQLite).
+
+        For PostgreSQL, calling raw_conn.close() does NOT close the physical
+        connection — SQLAlchemy intercepts it and returns the connection to
+        the QueuePool.  This is the correct way to release pooled connections.
+        """
         if self.use_postgres:
             conn = getattr(self._shared_local, 'conn', None)
-            pool = getattr(self._shared_local, '_pool_ref', None)
-            if conn and pool:
+            if conn is not None:
                 try:
-                    pool.put(conn)
+                    conn.close()   # returns to SQLAlchemy pool
                 except Exception:
                     pass
-            self._shared_local.conn = None
-            self._shared_local._pool_ref = None
-        else:
-            # SQLite: keep thread-local alive for the lifetime of the worker thread
-            pass
+                self._shared_local.conn = None
+        # SQLite: keep thread-local alive for the lifetime of the worker thread
 
     def init_db(self):
         """Initialize database schema"""
