@@ -10,6 +10,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import os
 import logging
+import traceback
 import uuid
 from typing import Optional, Dict, List
 import json
@@ -926,15 +927,24 @@ def get_projects():
             logger.info(
                 f'[API] Filters detected - delegating to search logic: region={region}, country={country}, brand={brand}, website={website}')
             offset = (page - 1) * limit
-
-            result = g.db.get_projects_with_website_grouping(
-                limit=limit,
-                offset=offset,
-                region=region,
-                country=country,
-                brand=brand,
-                website=website
-            )
+            try:
+                result = g.db.get_projects_with_website_grouping(
+                    limit=limit,
+                    offset=offset,
+                    region=region,
+                    country=country,
+                    brand=brand,
+                    website=website
+                )
+            except Exception as e:
+                err_detail = str(e)
+                logger.error(
+                    f'[API] /api/projects filter error: {err_detail}\n{traceback.format_exc()}')
+                return jsonify({
+                    'success': False,
+                    'error': 'Failed to fetch filtered projects',
+                    'details': err_detail
+                }), 500
 
             if result.get('success'):
                 return jsonify({
@@ -951,7 +961,13 @@ def get_projects():
                     }
                 }), 200
             else:
-                return jsonify({'error': result.get('error', 'Failed to fetch filtered projects')}), 500
+                err_detail = result.get('error', 'Failed to fetch filtered projects')
+                logger.error(f'[API] /api/projects filter DB returned error: {err_detail}\n{traceback.format_exc()}')
+                return jsonify({
+                    'success': False,
+                    'error': 'Failed to fetch filtered projects',
+                    'details': err_detail
+                }), 500
 
         logger.info(
             f'[API] Fetching projects: page={page}, limit={limit}, filter={filter_keyword or "none"}')

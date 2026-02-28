@@ -2735,15 +2735,25 @@ class ParseHubDatabase:
                                            brand: str = None, website: str = None,
                                            limit: int = 100, offset: int = 0) -> dict:
         """
-        Get projects with website grouping and metadata filtering
-        Returns projects grouped by website with metadata mapping
+        Get projects with website grouping and metadata filtering.
+        Uses WHERE 1=1 and AND col = %s; params list matches placeholders. Works with dict or tuple rows.
         """
+        # Column order for SELECT (for dict vs tuple row access)
+        _COLS = ('id', 'token', 'title', 'owner_email', 'main_site', 'created_at', 'updated_at',
+                  'metadata_id', 'region', 'country', 'brand', 'project_name', 'website_url', 'status')
+
+        def _row_val(row, idx):
+            if row is None:
+                return None
+            if isinstance(row, dict):
+                return row.get(_COLS[idx])
+            return row[idx] if idx < len(row) else None
+
         try:
-            # Create a fresh connection for this operation (thread-safe)
-            conn = self._get_connection()
+            self.connect()
             cursor = self.cursor()
 
-            # Build query with metadata joins and filtering
+            # Base query: WHERE 1=1, then AND only when param exists
             base_query = '''
                 SELECT DISTINCT p.id, p.token, p.title, p.owner_email, p.main_site,
                        p.created_at, p.updated_at,
@@ -2754,27 +2764,24 @@ class ParseHubDatabase:
                 LEFT JOIN metadata m ON pm.metadata_id = m.id
                 WHERE 1=1
             '''
-
             params = []
-
-            # Apply metadata filters
             if region:
                 base_query += ' AND m.region = %s'
                 params.append(region)
-
             if country:
                 base_query += ' AND m.country = %s'
                 params.append(country)
-
             if brand:
                 base_query += ' AND m.brand = %s'
                 params.append(brand)
 
-            # For website filter, we need to match against extracted website from title
-            # We'll do this in Python after fetching, not in SQL
-
-            # For count: execute a simpler query
-            count_query = 'SELECT COUNT(DISTINCT p.id) FROM projects p LEFT JOIN project_metadata pm ON p.id = pm.project_id LEFT JOIN metadata m ON pm.metadata_id = m.id WHERE 1=1'
+            # Count query: same WHERE/AND and same params (same order)
+            count_query = '''
+                SELECT COUNT(DISTINCT p.id) FROM projects p
+                LEFT JOIN project_metadata pm ON p.id = pm.project_id
+                LEFT JOIN metadata m ON pm.metadata_id = m.id
+                WHERE 1=1
+            '''
             if region:
                 count_query += ' AND m.region = %s'
             if country:
@@ -2785,14 +2792,16 @@ class ParseHubDatabase:
             try:
                 cursor.execute(count_query, params)
                 count_result = cursor.fetchone()
-                total = count_result[0] if count_result else 0
+                if count_result is None:
+                    total = 0
+                elif isinstance(count_result, dict):
+                    total = next((v for k, v in count_result.items() if isinstance(v, (int, float))), 0)
+                else:
+                    total = count_result[0] if count_result else 0
             except Exception as count_err:
-                # If count fails, just set total to unknown
                 total = -1
 
-            # Add pagination
             base_query += ' ORDER BY p.updated_at DESC'
-
             cursor.execute(base_query, params)
             rows = cursor.fetchall()
 
@@ -2801,28 +2810,25 @@ class ParseHubDatabase:
                 website_lower = website.strip().lower()
                 filtered_rows = []
                 for row in rows:
-                    title = row[2]
-                    extracted_website = self.extract_website_from_title(title)
+                    title = _row_val(row, 2)
+                    extracted_website = self.extract_website_from_title(title) if title else None
                     if extracted_website and website_lower in extracted_website.lower():
                         filtered_rows.append(row)
                 rows = filtered_rows
-                total = len(filtered_rows)  # Update total after website filter
+                total = len(filtered_rows)
 
-            # Apply pagination after website filtering
             start_idx = offset
             end_idx = offset + limit
             paginated_rows = rows[start_idx:end_idx]
 
-            # Group by website and project
             websites_dict = {}
             projects_dict = {}
 
             for row in paginated_rows:
-                project_id = row[0]
-                title = row[2]
-                website_extracted = self.extract_website_from_title(title)
+                project_id = _row_val(row, 0)
+                title = _row_val(row, 2)
+                website_extracted = self.extract_website_from_title(title) if title else None
 
-                # Initialize website group
                 if website_extracted not in websites_dict:
                     websites_dict[website_extracted] = {
                         'website': website_extracted,
@@ -2831,51 +2837,52 @@ class ParseHubDatabase:
                         'metadata_count': 0
                     }
 
-                # Initialize project
                 if project_id not in projects_dict:
                     project_data = {
-                        'id': row[0],
-                        'token': row[1],
-                        'title': row[2],
-                        'owner_email': row[3],
-                        'main_site': row[4],
-                        'created_at': row[5],
-                        'updated_at': row[6],
+                        'id': _row_val(row, 0),
+                        'token': _row_val(row, 1),
+                        'title': _row_val(row, 2),
+                        'owner_email': _row_val(row, 3),
+                        'main_site': _row_val(row, 4),
+                        'created_at': _row_val(row, 5),
+                        'updated_at': _row_val(row, 6),
                         'website': website_extracted,
                         'metadata': []
                     }
                     projects_dict[project_id] = project_data
-                    websites_dict[website_extracted]['projects'].append(
-                        project_data)
+                    websites_dict[website_extracted]['projects'].append(project_data)
                     websites_dict[website_extracted]['project_count'] += 1
 
-                # Add metadata if present
-                if row[7]:  # metadata_id
+                if _row_val(row, 7):  # metadata_id
                     metadata_item = {
-                        'id': row[7],
-                        'region': row[8],
-                        'country': row[9],
-                        'brand': row[10],
-                        'project_name': row[11],
-                        'website_url': row[12],
-                        'status': row[13]
+                        'id': _row_val(row, 7),
+                        'region': _row_val(row, 8),
+                        'country': _row_val(row, 9),
+                        'brand': _row_val(row, 10),
+                        'project_name': _row_val(row, 11),
+                        'website_url': _row_val(row, 12),
+                        'status': _row_val(row, 13)
                     }
                     projects_dict[project_id]['metadata'].append(metadata_item)
                     websites_dict[website_extracted]['metadata_count'] += 1
 
-            conn.close()
+            self.disconnect()
 
             return {
                 'success': True,
                 'by_website': list(websites_dict.values()),
                 'by_project': list(projects_dict.values()),
-                'total': total,
+                'total': total if total >= 0 else len(rows),
                 'limit': limit,
                 'offset': offset
             }
 
         except Exception as e:
             print(f"Error getting projects with website grouping: {e}")
+            try:
+                self.disconnect()
+            except Exception:
+                pass
             return {'success': False, 'error': str(e), 'by_website': [], 'by_project': []}
 
     def get_project_by_token(self, token: str) -> dict:
