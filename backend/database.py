@@ -2034,36 +2034,141 @@ class ParseHubDatabase:
             self.disconnect()
             return None
 
+    def get_metadata_table_columns(self) -> list:
+        """Return column names of the metadata table (from information_schema for Postgres, pragma for SQLite)."""
+        try:
+            self.connect()
+            cursor = self.cursor()
+            if self.use_postgres:
+                cursor.execute("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'metadata'
+                    ORDER BY ordinal_position
+                """)
+                rows = cursor.fetchall()
+                out = [r['column_name'] if isinstance(r, dict) else r[0] for r in rows]
+            else:
+                cursor.execute("PRAGMA table_info(metadata)")
+                rows = cursor.fetchall()
+                out = [r['name'] if isinstance(r, dict) else r[1] for r in rows]
+            self.disconnect()
+            return out
+        except Exception as e:
+            print(f"Error getting metadata columns: {e}")
+            self.disconnect()
+            return []
+
+    def _get_distinct_values_for_metadata_column(self, column_name: str) -> list:
+        """Return distinct non-null, non-empty values for a metadata column. column_name must be in get_metadata_table_columns()."""
+        try:
+            columns = self.get_metadata_table_columns()
+            if column_name not in columns:
+                return []
+            self.connect()
+            cursor = self.cursor()
+            # Safe identifier: column_name is from schema list; quote for PostgreSQL
+            q = '"' + column_name.replace('"', '""') + '"'
+            if self.use_postgres:
+                cursor.execute(
+                    f'SELECT DISTINCT {q} FROM metadata WHERE {q} IS NOT NULL AND TRIM(COALESCE({q}::text, \'\')) != \'\' ORDER BY {q}'
+                )
+            else:
+                cursor.execute(
+                    f'SELECT DISTINCT {q} FROM metadata WHERE {q} IS NOT NULL AND {q} != \'\' ORDER BY {q}'
+                )
+            rows = cursor.fetchall()
+            out = [r[column_name] if isinstance(r, dict) else r[0] for r in rows]
+            self.disconnect()
+            return out
+        except Exception as e:
+            print(f"Error getting distinct values for {column_name}: {e}")
+            self.disconnect()
+            return []
+
+    def get_filters_schema_aware(self) -> dict:
+        """Return filters (regions, countries, brands, websites) using actual metadata columns."""
+        CANDIDATES = {
+            'region': ['region', 'Region', 'msa_region', 'project_region'],
+            'country': ['country', 'Country', 'msa_country', 'project_country'],
+            'brand': ['brand', 'Brand', 'msa_brand'],
+            'website': ['website', 'Website', 'site', 'domain', 'main_site'],
+        }
+        columns = self.get_metadata_table_columns()
+        columns_set = set(c.lower() for c in columns)
+        columns_lookup = {c.lower(): c for c in columns}
+
+        result = {'regions': [], 'countries': [], 'brands': [], 'websites': []}
+        for field, keys in [('regions', CANDIDATES['region']), ('countries', CANDIDATES['country']),
+                           ('brands', CANDIDATES['brand']), ('websites', CANDIDATES['website'])]:
+            col = None
+            for k in keys:
+                if k.lower() in columns_lookup:
+                    col = columns_lookup[k.lower()]
+                    break
+            if col:
+                result[field] = self._get_distinct_values_for_metadata_column(col)
+            # else leave empty list
+        return result
+
     def get_metadata_filtered(self, project_token: str = None, region: str = None, country: str = None,
                               brand: str = None, limit: int = 100, offset: int = 0):
-        """Get metadata records with optional filters"""
+        """Get metadata records with optional filters. Uses only columns that exist in metadata table."""
+        CANDIDATES = {
+            'region': ['region', 'Region', 'msa_region', 'project_region'],
+            'country': ['country', 'Country', 'msa_country', 'project_country'],
+            'brand': ['brand', 'Brand', 'msa_brand'],
+        }
         try:
-            conn = self.connect()
+            self.connect()
             cursor = self.cursor()
+            columns = self.get_metadata_table_columns()
+            col_map = {c.lower(): c for c in columns}
+
+            def quoted(c):
+                return '"' + c.replace('"', '""') + '"'
 
             query = "SELECT * FROM metadata WHERE 1=1"
             params = []
 
             if project_token:
-                query += " AND project_token = %s"
-                params.append(project_token)
+                for cand in ['project_token', 'token', 'project_name']:
+                    if cand.lower() in col_map:
+                        col_name = col_map[cand.lower()]
+                        query += " AND " + quoted(col_name) + " = %s"
+                        params.append(project_token)
+                        break
             if region:
-                query += " AND region = %s"
-                params.append(region)
+                for cand in CANDIDATES['region']:
+                    if cand.lower() in col_map:
+                        col_name = col_map[cand.lower()]
+                        query += " AND " + quoted(col_name) + " = %s"
+                        params.append(region)
+                        break
             if country:
-                query += " AND country = %s"
-                params.append(country)
+                for cand in CANDIDATES['country']:
+                    if cand.lower() in col_map:
+                        col_name = col_map[cand.lower()]
+                        query += " AND " + quoted(col_name) + " = %s"
+                        params.append(country)
+                        break
             if brand:
-                query += " AND brand = %s"
-                params.append(brand)
+                for cand in CANDIDATES['brand']:
+                    if cand.lower() in col_map:
+                        col_name = col_map[cand.lower()]
+                        query += " AND " + quoted(col_name) + " = %s"
+                        params.append(brand)
+                        break
 
-            # Sort by updated_date descending
-            query += " ORDER BY updated_date DESC LIMIT %s OFFSET %s"
+            if 'updated_date' in col_map:
+                query += " ORDER BY " + quoted(col_map['updated_date']) + " DESC"
+            elif 'id' in col_map:
+                query += " ORDER BY " + quoted(col_map['id']) + " DESC"
+            query += " LIMIT %s OFFSET %s"
             params.extend([limit, offset])
 
             cursor.execute(query, params)
-            records = [dict(row) for row in cursor.fetchall()]
-
+            rows = cursor.fetchall()
+            records = [dict(r) if isinstance(r, dict) else r for r in rows]
             self.disconnect()
             return records
 

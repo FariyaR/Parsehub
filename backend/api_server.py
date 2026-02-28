@@ -119,6 +119,28 @@ def _initialize_services():
         except Exception as exc:
             logger.error(f'[boot] Background services failed: {exc}')
 
+        # One-time startup log: metadata columns and filter column mapping
+        try:
+            if _db is not None:
+                cols = _db.get_metadata_table_columns()
+                logger.info(f'[boot] Metadata table columns: {cols}')
+                CANDIDATES = {
+                    'region': ['region', 'Region', 'msa_region', 'project_region'],
+                    'country': ['country', 'Country', 'msa_country', 'project_country'],
+                    'brand': ['brand', 'Brand', 'msa_brand'],
+                    'website': ['website', 'Website', 'site', 'domain', 'main_site'],
+                }
+                lookup = {c.lower(): c for c in cols}
+                mapping = {}
+                for field, keys in CANDIDATES.items():
+                    for k in keys:
+                        if k.lower() in lookup:
+                            mapping[field] = lookup[k.lower()]
+                            break
+                logger.info(f'[boot] Filter columns (region/country/brand/website): {mapping}')
+        except Exception as exc:
+            logger.debug(f'[boot] Metadata columns log skipped: {exc}')
+
         logger.info('[boot] Initialization complete (DB errors above are non-fatal).')
 
 
@@ -1206,28 +1228,33 @@ def search_projects():
         return jsonify({'error': 'Failed to search projects', 'details': str(e)}), 500
 
 
+@app.route('/api/debug/metadata-columns', methods=['GET'])
+def get_debug_metadata_columns():
+    """Return all column names of the metadata table (from information_schema / pragma), ordered by ordinal position."""
+    if not validate_api_key(request):
+        return jsonify({'error': 'Unauthorized'}), 401
+    try:
+        columns = g.db.get_metadata_table_columns()
+        return jsonify({'success': True, 'columns': columns}), 200
+    except Exception as e:
+        logger.error(f'[API] Error in /api/debug/metadata-columns: {e}')
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/filters', methods=['GET'])
 def get_filters():
     """
-    Get all available filter options
-    Returns regions, countries, brands, and websites
+    Get all available filter options (schema-aware from metadata table).
+    Returns regions, countries, brands, and websites; uses actual column names from DB.
     """
     if not validate_api_key(request):
         return jsonify({'error': 'Unauthorized'}), 401
 
     try:
-        logger.info('[API] Getting filter options...')
-
-        filters = {
-            'regions': g.db.get_distinct_metadata_values('region'),
-            'countries': g.db.get_distinct_metadata_values('country'),
-            'brands': g.db.get_distinct_metadata_values('brand'),
-            'websites': g.db.get_distinct_project_websites()
-        }
-
+        logger.info('[API] Getting filter options (schema-aware)...')
+        filters = g.db.get_filters_schema_aware()
         logger.info(
             f'[API] Filters - Regions: {len(filters["regions"])}, Countries: {len(filters["countries"])}, Brands: {len(filters["brands"])}, Websites: {len(filters["websites"])}')
-
         return jsonify({
             'success': True,
             'filters': filters
