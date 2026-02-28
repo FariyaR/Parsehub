@@ -210,7 +210,7 @@ class MonitoringService:
             cursor.execute('''
                 SELECT id, personal_project_id, project_name, total_pages, current_page_scraped
                 FROM metadata 
-                WHERE project_id = ?
+                WHERE project_id = %s
                 ORDER BY updated_date DESC
                 LIMIT 1
             ''', (project_id,))

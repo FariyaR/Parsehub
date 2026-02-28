@@ -23,11 +23,11 @@ class AnalyticsService:
             if not conn:
                 return self._default_analytics(project_token)
             
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Get project ID
             try:
-                cursor.execute('SELECT id FROM projects WHERE token = ?', (project_token,))
+                cursor.execute('SELECT id FROM projects WHERE token = %s', (project_token,))
                 project = cursor.fetchone()
             except Exception as e:
                 print(f"Error querying project: {e}", file=sys.stderr)
@@ -48,7 +48,7 @@ class AnalyticsService:
                     SELECT id, run_token, status, pages_scraped, start_time, 
                            end_time, duration_seconds, records_count, created_at, is_empty
                     FROM runs 
-                    WHERE project_id = ? 
+                    WHERE project_id = %s 
                     ORDER BY created_at DESC
                 ''', (project_id,))
 
@@ -61,7 +61,7 @@ class AnalyticsService:
             try:
                 cursor.execute('''
                     SELECT * FROM recovery_operations 
-                    WHERE project_id = ? 
+                    WHERE project_id = %s 
                     ORDER BY created_at DESC
                     LIMIT 5
                 ''', (project_id,))
@@ -250,12 +250,12 @@ class AnalyticsService:
         """Analyze data quality and completeness"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Get all data keys
             cursor.execute('''
                 SELECT DISTINCT data_key FROM scraped_data 
-                WHERE project_id = ?
+                WHERE project_id = %s
             ''', (project_id,))
 
             fields = [row['data_key'] for row in cursor.fetchall()]
@@ -272,12 +272,12 @@ class AnalyticsService:
                     SELECT COUNT(*) as total_records,
                            SUM(CASE WHEN data_value IS NOT NULL AND data_value != '' THEN 1 ELSE 0 END) as filled
                     FROM scraped_data 
-                    WHERE project_id = ? AND data_key = ?
+                    WHERE project_id = %s AND data_key = %s
                 ''', (project_id, field))
 
                 stats = cursor.fetchone()
-                total = stats['total_records']
-                filled = stats['filled'] or 0
+                total = (stats['total_records'] if isinstance(stats, dict) else stats[0]) if stats else 0
+                filled = (stats.get('filled') or 0) if isinstance(stats, dict) else (stats[1] if stats and len(stats) > 1 else 0)
 
                 completion = int((filled / total * 100)) if total > 0 else 0
 

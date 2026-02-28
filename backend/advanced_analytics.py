@@ -35,7 +35,7 @@ class AdvancedAnalyticsService:
         
         # Get project info
         cursor.execute('''
-            SELECT id, token, title FROM projects WHERE id = ?
+            SELECT id, token, title FROM projects WHERE id = %s
         ''', (project_id,))
         project = cursor.fetchone()
         
@@ -45,7 +45,7 @@ class AdvancedAnalyticsService:
         
         # Get data stats
         cursor.execute('''
-            SELECT COUNT(*) as total FROM scraped_data WHERE project_id = ?
+            SELECT COUNT(*) as total FROM scraped_data WHERE project_id = %s
         ''', (project_id,))
         total_records = cursor.fetchone()['total'] or 0
         
@@ -55,7 +55,7 @@ class AdvancedAnalyticsService:
                 COUNT(*) as total_runs,
                 SUM(CASE WHEN status='complete' THEN 1 ELSE 0 END) as completed_runs,
                 MAX(end_time) as last_completed
-            FROM runs WHERE project_id = ?
+            FROM runs WHERE project_id = %s
         ''', (project_id,))
         runs_info = cursor.fetchone()
         
@@ -66,7 +66,7 @@ class AdvancedAnalyticsService:
         cursor.execute('''
             SELECT 
                 MAX(CAST(json_extract(data, '$.page_number') AS INTEGER)) as last_page
-            FROM scraped_data WHERE project_id = ?
+            FROM scraped_data WHERE project_id = %s
         ''', (project_id,))
         page_result = cursor.fetchone()
         last_page = page_result['last_page'] or 1 if page_result else 1
@@ -117,7 +117,7 @@ class AdvancedAnalyticsService:
         
         # Get all data for this project
         cursor.execute('''
-            SELECT data FROM scraped_data WHERE project_id = ?
+            SELECT data FROM scraped_data WHERE project_id = %s
             ORDER BY created_at ASC
         ''', (project_id,))
         
@@ -210,8 +210,8 @@ class AdvancedAnalyticsService:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT data FROM scraped_data WHERE project_id = ?
-            LIMIT ?
+            SELECT data FROM scraped_data WHERE project_id = %s
+            LIMIT %s
         ''', (project_id, limit))
         
         rows = cursor.fetchall()
@@ -235,7 +235,7 @@ class AdvancedAnalyticsService:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT data FROM scraped_data WHERE project_id = ?
+            SELECT data FROM scraped_data WHERE project_id = %s
             ORDER BY created_at ASC
         ''', (project_id,))
         
@@ -277,7 +277,7 @@ class AdvancedAnalyticsService:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT data FROM scraped_data WHERE project_id = ?
+            SELECT data FROM scraped_data WHERE project_id = %s
             ORDER BY created_at ASC
         ''', (project_id,))
         

@@ -95,7 +95,7 @@ class PaginationService:
         cursor.execute('''
             SELECT MAX(CAST(json_extract(data, '$.page_number') AS INTEGER)) as last_page
             FROM scraped_data 
-            WHERE project_id = ?
+            WHERE project_id = %s
         ''', (project_id,))
         
         result = cursor.fetchone()
@@ -104,7 +104,7 @@ class PaginationService:
         # Get total data count
         cursor.execute('''
             SELECT COUNT(*) as total FROM scraped_data 
-            WHERE project_id = ?
+            WHERE project_id = %s
         ''', (project_id,))
         
         total_count = cursor.fetchone()['total'] or 0
@@ -145,10 +145,10 @@ class PaginationService:
             INSERT INTO run_checkpoints
             (run_id, snapshot_timestamp, item_count_at_time, items_per_minute)
             VALUES (
-                (SELECT id FROM runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1),
+                (SELECT id FROM runs WHERE project_id = %s ORDER BY created_at DESC LIMIT 1),
                 CURRENT_TIMESTAMP,
-                ?,
-                ?
+                %s,
+                %s
             )
         ''', (project_id, data_count, items_per_minute))
         

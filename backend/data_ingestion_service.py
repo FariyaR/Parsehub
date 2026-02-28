@@ -376,7 +376,7 @@ class ParseHubDataIngestor:
         try:
             # Check if run exists
             cursor.execute(
-                'SELECT id FROM runs WHERE run_token = ?', (run_token,))
+                'SELECT id FROM runs WHERE run_token = %s', (run_token,))
             row = cursor.fetchone()
 
             if row:
@@ -391,7 +391,7 @@ class ParseHubDataIngestor:
 
             cursor.execute('''
                 INSERT INTO runs (project_id, run_token, status, pages_scraped, start_time, end_time)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
             ''', (project_id, run_token, status, pages, start_time, end_time))
 
             conn.commit()

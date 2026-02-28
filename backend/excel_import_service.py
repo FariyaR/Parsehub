@@ -279,7 +279,7 @@ class ExcelImportService:
                 conn = self.db.connect()
                 cursor = conn.cursor()
                 cursor.execute(
-                    'SELECT id FROM projects WHERE token = ?', (project_token,))
+                    'SELECT id FROM projects WHERE token = %s', (project_token,))
                 result = cursor.fetchone()
                 if result:
                     project_id = result['id']
@@ -364,7 +364,7 @@ class ExcelImportService:
             cursor.execute('''
                 SELECT * FROM import_batches 
                 ORDER BY upload_date DESC 
-                LIMIT ?
+                LIMIT %s
             ''', (limit,))
 
             batches = [dict(row) for row in cursor.fetchall()]

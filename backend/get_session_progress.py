@@ -44,7 +44,7 @@ def get_session_progress(session_id: int) -> dict:
         cursor.execute('''
             SELECT id, project_token, project_name, total_pages_target, 
                    pages_completed, current_iteration, status, created_at
-            FROM scraping_sessions WHERE id = ?
+            FROM scraping_sessions WHERE id = %s
         ''', (session_id,))
         
         session = cursor.fetchone()
@@ -57,7 +57,7 @@ def get_session_progress(session_id: int) -> dict:
         cursor.execute('''
             SELECT id, iteration_number, parsehub_project_name, start_page_number,
                    end_page_number, records_count, status, completed_at
-            FROM iteration_runs WHERE session_id = ?
+            FROM iteration_runs WHERE session_id = %s
             ORDER BY iteration_number
         ''', (session_id,))
         

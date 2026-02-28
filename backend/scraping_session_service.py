@@ -20,12 +20,12 @@ class ScrapingSessionService:
         """Create a new scraping session"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 INSERT INTO scraping_sessions 
                 (project_token, project_name, total_pages_target, status)
-                VALUES (?, ?, ?, 'running')
+                VALUES (%s, %s, %s, 'running')
             ''', (project_token, project_name, total_pages_target))
 
             conn.commit()
@@ -42,7 +42,7 @@ class ScrapingSessionService:
             # Session already exists for this project_token and target
             cursor.execute('''
                 SELECT id, status FROM scraping_sessions
-                WHERE project_token = ? AND total_pages_target = ?
+                WHERE project_token = %s AND total_pages_target = %s
             ''', (project_token, total_pages_target))
             
             result = cursor.fetchone()
@@ -62,12 +62,12 @@ class ScrapingSessionService:
         """Get session details"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 SELECT id, project_token, project_name, total_pages_target,
                        current_iteration, pages_completed, status, created_at, updated_at
-                FROM scraping_sessions WHERE id = ?
+                FROM scraping_sessions WHERE id = %s
             ''', (session_id,))
 
             result = cursor.fetchone()
@@ -96,7 +96,7 @@ class ScrapingSessionService:
         """Record a new iteration run"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             pages_in_run = end_page - start_page + 1
 
@@ -104,7 +104,7 @@ class ScrapingSessionService:
                 INSERT INTO iteration_runs
                 (session_id, iteration_number, parsehub_project_token, parsehub_project_name,
                  start_page_number, end_page_number, pages_in_this_run, run_token, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'running')
             ''', (session_id, iteration_number, parsehub_project_token, parsehub_project_name,
                   start_page, end_page, pages_in_run, run_token))
 
@@ -125,12 +125,12 @@ class ScrapingSessionService:
         """Update iteration run with results"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 UPDATE iteration_runs
-                SET csv_data = ?, records_count = ?, status = ?, completed_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET csv_data = %s, records_count = %s, status = %s, completed_at = CURRENT_TIMESTAMP
+                WHERE id = %s
             ''', (csv_data, records_count, status, run_id))
 
             conn.commit()
@@ -145,14 +145,14 @@ class ScrapingSessionService:
         """Get all iteration runs for a session"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 SELECT id, iteration_number, parsehub_project_name,
                        start_page_number, end_page_number, pages_in_this_run,
                        records_count, status, created_at
                 FROM iteration_runs
-                WHERE session_id = ?
+                WHERE session_id = %s
                 ORDER BY iteration_number
             ''', (session_id,))
 
@@ -168,12 +168,12 @@ class ScrapingSessionService:
         """Update session progress"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 UPDATE scraping_sessions
-                SET pages_completed = ?, status = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                SET pages_completed = %s, status = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
             ''', (pages_completed, status, session_id))
 
             conn.commit()
@@ -187,12 +187,12 @@ class ScrapingSessionService:
         """Mark session as complete"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 UPDATE scraping_sessions
                 SET status = 'complete', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = %s
             ''', (session_id,))
 
             conn.commit()
@@ -207,12 +207,12 @@ class ScrapingSessionService:
         """Save consolidated/combined data"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 INSERT OR REPLACE INTO combined_scraped_data
                 (session_id, consolidated_csv, total_records, total_pages_scraped, deduplicated_record_count)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
             ''', (session_id, consolidated_csv, total_records, total_pages, deduplicated_count))
 
             conn.commit()
@@ -226,12 +226,12 @@ class ScrapingSessionService:
         """Get consolidated data for a session"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 SELECT consolidated_csv, total_records, total_pages_scraped, deduplicated_record_count
                 FROM combined_scraped_data
-                WHERE session_id = ?
+                WHERE session_id = %s
             ''', (session_id,))
 
             result = cursor.fetchone()
@@ -252,12 +252,12 @@ class ScrapingSessionService:
         """Save detected URL pattern for a project"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 INSERT OR REPLACE INTO url_patterns
                 (project_token, original_url, pattern_type, pattern_regex, last_page_placeholder)
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s)
             ''', (project_token, original_url, pattern_type, pattern_regex, placeholder))
 
             conn.commit()
@@ -271,11 +271,11 @@ class ScrapingSessionService:
         """Get stored URL pattern for a project"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             cursor.execute('''
                 SELECT original_url, pattern_type, pattern_regex, last_page_placeholder
-                FROM url_patterns WHERE project_token = ?
+                FROM url_patterns WHERE project_token = %s
             ''', (project_token,))
 
             result = cursor.fetchone()

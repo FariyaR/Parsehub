@@ -61,11 +61,11 @@ class IncrementalScrapingManager:
                 cursor.execute('''
                     SELECT SUM(pages_scraped) as total_pages_db
                     FROM runs
-                    WHERE project_id = ? AND status = 'completed'
+                    WHERE project_id = %s AND status = 'completed'
                 ''', (project_id,))
 
                 result = cursor.fetchone()
-                pages_from_runs = result[0] or 0
+                pages_from_runs = (result['total_pages_db'] if isinstance(result, dict) else result[0]) or 0
 
                 print(f"Database: {pages_from_runs} pages from completed runs")
                 print(
@@ -328,7 +328,7 @@ class IncrementalScrapingManager:
         """Store information about the continuation run in database"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Create continuation run record
             cursor.execute('''
@@ -336,14 +336,14 @@ class IncrementalScrapingManager:
                     project_id, run_token, status, pages_scraped,
                     start_time, is_continuation, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
             ''', (
                 original_project_id,
                 run_token,
                 'starting',
                 pages_count,
                 datetime.now(),
-                1,  # is_continuation = True
+                True,  # is_continuation
                 datetime.now()
             ))
 
@@ -360,13 +360,13 @@ class IncrementalScrapingManager:
         """Monitor running continuation runs and update status"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Get active continuation runs
             cursor.execute('''
                 SELECT id, run_token, project_id
                 FROM runs
-                WHERE is_continuation = 1 AND status IN ('starting', 'running')
+                WHERE is_continuation = TRUE AND status IN ('starting', 'running')
                 ORDER BY created_at DESC
                 LIMIT 10
             ''')
@@ -374,7 +374,10 @@ class IncrementalScrapingManager:
             active_runs = cursor.fetchall()
             conn.close()
 
-            for run_id, run_token, project_id in active_runs:
+            for row in active_runs:
+                run_id = row['id'] if isinstance(row, dict) else row[0]
+                run_token = row['run_token'] if isinstance(row, dict) else row[1]
+                project_id = row['project_id'] if isinstance(row, dict) else row[2]
                 print(f"\nChecking continuation run: {run_token}")
 
                 # Get run status from ParseHub API
@@ -393,11 +396,11 @@ class IncrementalScrapingManager:
 
                 # Update run status in database
                 conn = self.db.connect()
-                cursor = conn.cursor()
+                cursor = self.db.cursor()
                 cursor.execute('''
                     UPDATE runs
-                    SET status = ?, pages_scraped = ?
-                    WHERE id = ?
+                    SET status = %s, pages_scraped = %s
+                    WHERE id = %s
                 ''', (status, pages_scraped, run_id))
                 conn.commit()
 
@@ -415,25 +418,26 @@ class IncrementalScrapingManager:
         """Update current_page_scraped in metadata after successful run"""
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Get current metadata
             cursor.execute('''
                 SELECT current_page_scraped, total_pages
                 FROM metadata
-                WHERE project_id = ?
+                WHERE project_id = %s
             ''', (project_id,))
 
             result = cursor.fetchone()
             if result:
-                current_page, total_pages = result
+                current_page = result['current_page_scraped'] if isinstance(result, dict) else result[0]
+                total_pages = result['total_pages'] if isinstance(result, dict) else result[1]
                 new_current_page = min(
                     current_page + pages_scraped, total_pages)
 
                 cursor.execute('''
                     UPDATE metadata
-                    SET current_page_scraped = ?, updated_date = ?
-                    WHERE project_id = ?
+                    SET current_page_scraped = %s, updated_date = %s
+                    WHERE project_id = %s
                 ''', (new_current_page, datetime.now(), project_id))
 
                 conn.commit()

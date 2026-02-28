@@ -193,34 +193,34 @@ class AutoSyncService:
 
             # Update project in database
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Check if project exists
-            cursor.execute('SELECT id FROM projects WHERE token = ?', (token,))
+            cursor.execute('SELECT id FROM projects WHERE token = %s', (token,))
             existing = cursor.fetchone()
 
             if existing:
                 # Update existing project
                 cursor.execute('''
                     UPDATE projects 
-                    SET title = ?, 
-                        owner_email = ?,
-                        main_site = ?,
+                    SET title = %s, 
+                        owner_email = %s,
+                        main_site = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE token = ?
+                    WHERE token = %s
                 ''', (
                     title,
                     project.get('owner_email'),
                     project.get('main_site'),
                     token
                 ))
-                project_id = existing[0]
+                project_id = existing['id'] if isinstance(existing, dict) else existing[0]
                 logger.info(f"   [OK] Updated project (ID: {project_id})")
             else:
                 # Insert new project
                 cursor.execute('''
                     INSERT INTO projects (token, title, owner_email, main_site)
-                    VALUES (?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s)
                 ''', (
                     token,
                     title,
@@ -253,11 +253,11 @@ class AutoSyncService:
             status = run_data.get('status', 'unknown')
 
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Check if run exists
             cursor.execute(
-                'SELECT id, status FROM runs WHERE run_token = ?', (run_token,))
+                'SELECT id, status FROM runs WHERE run_token = %s', (run_token,))
             existing = cursor.fetchone()
 
             # Parse timestamps
@@ -283,20 +283,20 @@ class AutoSyncService:
             data_ready = run_data.get('data_ready', 0)
 
             if existing:
-                run_id = existing[0]
-                old_status = existing[1]
+                run_id = existing['id'] if isinstance(existing, dict) else existing[0]
+                old_status = existing['status'] if isinstance(existing, dict) else existing[1]
 
                 # Only update if status changed or run is active
                 if old_status != status or status in ['running', 'initializing']:
                     cursor.execute('''
                         UPDATE runs
-                        SET status = ?,
-                            pages_scraped = ?,
-                            start_time = ?,
-                            end_time = ?,
-                            duration_seconds = ?,
+                        SET status = %s,
+                            pages_scraped = %s,
+                            start_time = %s,
+                            end_time = %s,
+                            duration_seconds = %s,
                             updated_at = CURRENT_TIMESTAMP
-                        WHERE run_token = ?
+                        WHERE run_token = %s
                     ''', (
                         status,
                         pages_scraped,
@@ -319,7 +319,7 @@ class AutoSyncService:
                         project_id, run_token, status, pages_scraped,
                         start_time, end_time, duration_seconds
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ''', (
                     project_id,
                     run_token,
@@ -382,11 +382,11 @@ class AutoSyncService:
                         # Update run status
                         cursor.execute('''
                             UPDATE runs
-                            SET status = ?,
-                                pages_scraped = ?,
-                                end_time = ?,
+                            SET status = %s,
+                                pages_scraped = %s,
+                                end_time = %s,
                                 updated_at = CURRENT_TIMESTAMP
-                            WHERE id = ?
+                            WHERE id = %s
                         ''', (
                             new_status,
                             run_details.get('pages', 0),

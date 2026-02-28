@@ -169,13 +169,24 @@ def health_check():
 
 @app.route('/api/health/db', methods=['GET'], endpoint='health_readiness')
 def health_check_db():
-    """Readiness probe — verifies database connectivity."""
+    """Readiness probe — verifies database connectivity and returns table counts."""
     try:
         from db_pool import ping_db
-        ok = ping_db()
-        if ok:
-            return jsonify({'status': 'ok', 'database': 'reachable'}), 200
-        return jsonify({'status': 'error', 'database': 'unreachable'}), 503
+        if not ping_db():
+            return jsonify({'status': 'error', 'database': 'unreachable'}), 503
+        cursor = g.db.cursor()
+        cursor.execute('SELECT COUNT(*) AS count FROM projects')
+        r1 = cursor.fetchone()
+        projects = r1['count'] if isinstance(r1, dict) else r1[0]
+        cursor.execute('SELECT COUNT(*) AS count FROM metadata')
+        r2 = cursor.fetchone()
+        metadata = r2['count'] if isinstance(r2, dict) else r2[0]
+        return jsonify({
+            'status': 'ok',
+            'database': 'reachable',
+            'projects': projects,
+            'metadata': metadata,
+        }), 200
     except Exception as exc:
         return jsonify({'status': 'error', 'detail': str(exc)}), 503
 
@@ -1258,13 +1269,10 @@ def get_project_details(project_token: str):
     try:
         logger.info(f'[API] Fetching project details: token={project_token}')
 
-        # IMPORTANT: lookup by token (string identifier used by frontend),
-        # not by numeric id. For Postgres use %s placeholders; for SQLite use ?.
-        placeholder = '%s' if getattr(g.db, 'use_postgres', False) else '?'
+        # Lookup by token (string identifier used by frontend), not by numeric id.
         cursor = g.db.cursor()
-
         cursor.execute(
-            f'SELECT * FROM projects WHERE token = {placeholder}',
+            'SELECT * FROM projects WHERE token = %s',
             (project_token,)
         )
         row = cursor.fetchone()
@@ -1280,11 +1288,11 @@ def get_project_details(project_token: str):
         last_run = None
         if project_id is not None:
             cursor.execute(
-                f'''
+                '''
                 SELECT run_token, status, pages_scraped, start_time, end_time,
                        duration_seconds, created_at, updated_at
                 FROM runs
-                WHERE project_id = {placeholder}
+                WHERE project_id = %s
                 ORDER BY created_at DESC
                 LIMIT 1
                 ''',
@@ -1457,7 +1465,7 @@ def get_project_analytics(token: str):
     try:
         logger.info(f'[API] Fetching analytics for project: {token}')
 
-        analytics = analytics_service.get_project_analytics(token)
+        analytics = _analytics_service.get_project_analytics(token) if _analytics_service else None
 
         if analytics is None:
             logger.warning(
@@ -1772,7 +1780,7 @@ def get_scraping_status(project_id: int):
             SELECT m.total_pages, m.current_page_scraped, m.project_name, p.token
             FROM metadata m
             JOIN projects p ON m.project_id = p.id
-            WHERE p.id = ?
+            WHERE p.id = %s
         ''', (project_id,))
 
         result = cursor.fetchone()

@@ -109,8 +109,7 @@ class ParseHubDatabase:
             self.cursor = cursor
         
         def execute(self, sql, params=None):
-            # Translate SQL from SQLite to PostgreSQL syntax
-            sql = sql.replace('?', '%s')
+            # SQL source uses %s; Postgres expects %s. Only fix schema keywords.
             sql = sql.replace('AUTOINCREMENT', 'SERIAL')
             sql = sql.replace('INSERT OR REPLACE', 'INSERT') # Simple shim, technically incomplete for REPLACE
             
@@ -149,9 +148,10 @@ class ParseHubDatabase:
         @property
         def lastrowid(self):
             try:
-                self.cursor.execute("SELECT lastval()")
-                return self.cursor.fetchone()[0]
-            except:
+                self.cursor.execute("SELECT lastval() AS id")
+                row = self.cursor.fetchone()
+                return row['id'] if isinstance(row, dict) else row[0]
+            except Exception:
                 return None
 
         def __iter__(self):
@@ -162,16 +162,27 @@ class ParseHubDatabase:
             return getattr(self.cursor, name)
 
 
+    class _SQLiteCursorShim:
+        """For SQLite: source uses %s; SQLite expects ?."""
+        def __init__(self, cursor):
+            self.cursor = cursor
+        def execute(self, sql, params=None):
+            sql = sql.replace('%s', '?')
+            return self.cursor.execute(sql, params) if params else self.cursor.execute(sql)
+        def fetchone(self): return self.cursor.fetchone()
+        def fetchall(self): return self.cursor.fetchall()
+        @property
+        def lastrowid(self): return getattr(self.cursor, 'lastrowid', None)
+        def __getattr__(self, name): return getattr(self.cursor, name)
+
     def cursor(self):
-        """Get a cursor with compatibility shim"""
+        """Get a cursor (RealDictCursor for Postgres, shim for SQLite)."""
         if not self.conn:
             self.connect()
-        
         if self.use_postgres:
             cursor = self.conn.cursor(cursor_factory=RealDictCursor)
             return self.PgCursorShim(cursor)
-        else:
-            return self.conn.cursor()
+        return self._SQLiteCursorShim(self.conn.cursor())
 
 
     def connect(self):
@@ -252,7 +263,7 @@ class ParseHubDatabase:
     def init_db(self):
         """Initialize database schema"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         if self.use_postgres:
             # Load and execute PG specific schema
@@ -681,11 +692,11 @@ class ParseHubDatabase:
     def add_project(self, token: str, title: str, owner_email: str = None, main_site: str = None):
         """Add or update project"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute('''
             INSERT OR REPLACE INTO projects (token, title, owner_email, main_site, updated_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
         ''', (token, title, owner_email, main_site))
 
         conn.commit()
@@ -695,11 +706,11 @@ class ParseHubDatabase:
                 start_time: str, end_time: str = None, data_file: str = None, is_empty: bool = False):
         """Add a new run record"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         # Get project ID
         cursor.execute(
-            'SELECT id FROM projects WHERE token = ?', (project_token,))
+            'SELECT id FROM projects WHERE token = %s', (project_token,))
         project = cursor.fetchone()
 
         if not project:
@@ -720,7 +731,7 @@ class ParseHubDatabase:
         cursor.execute('''
             INSERT INTO runs 
             (project_id, run_token, status, pages_scraped, start_time, end_time, duration_seconds, data_file, is_empty)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         ''', (project_id, run_token, status, pages, start_time, end_time, duration, data_file, is_empty))
 
         conn.commit()
@@ -732,12 +743,12 @@ class ParseHubDatabase:
     def store_scraped_data(self, run_id: int, project_id: int = None, data: dict | list = None):
         """Store scraped data from JSON"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         # If project_id not provided, get it from run
         if project_id is None:
             cursor.execute(
-                'SELECT project_id FROM runs WHERE id = ?', (run_id,))
+                'SELECT project_id FROM runs WHERE id = %s', (run_id,))
             run = cursor.fetchone()
             if run:
                 project_id = run['project_id']
@@ -754,7 +765,7 @@ class ParseHubDatabase:
                     for key, value in item.items():
                         cursor.execute('''
                             INSERT INTO scraped_data (run_id, project_id, data_key, data_value)
-                            VALUES (?, ?, ?, ?)
+                            VALUES (%s, %s, %s, %s)
                         ''', (run_id, project_id, key, str(value)))
                     records += 1
         elif isinstance(data, dict):
@@ -766,14 +777,14 @@ class ParseHubDatabase:
                         for field, field_value in item.items():
                             cursor.execute('''
                                 INSERT INTO scraped_data (run_id, project_id, data_key, data_value)
-                                VALUES (?, ?, ?, ?)
+                                VALUES (%s, %s, %s, %s)
                             ''', (run_id, project_id, field, str(field_value)))
                         records += 1
                     break
 
         # Update records count in runs table
         cursor.execute(
-            'UPDATE runs SET records_count = ? WHERE id = ?', (records, run_id))
+            'UPDATE runs SET records_count = %s WHERE id = %s', (records, run_id))
 
         conn.commit()
         self.disconnect()
@@ -783,10 +794,10 @@ class ParseHubDatabase:
     def get_project_analytics(self, project_token: str) -> dict:
         """Get analytics for a specific project"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute(
-            'SELECT id FROM projects WHERE token = ?', (project_token,))
+            'SELECT id FROM projects WHERE token = %s', (project_token,))
         project = cursor.fetchone()
 
         if not project:
@@ -797,37 +808,37 @@ class ParseHubDatabase:
 
         # Total runs
         cursor.execute(
-            'SELECT COUNT(*) as count FROM runs WHERE project_id = ?', (project_id,))
+            'SELECT COUNT(*) as count FROM runs WHERE project_id = %s', (project_id,))
         total_runs = cursor.fetchone()['count']
 
         # Completed runs
-        cursor.execute('SELECT COUNT(*) as count FROM runs WHERE project_id = ? AND status = ?',
+        cursor.execute('SELECT COUNT(*) as count FROM runs WHERE project_id = %s AND status = %s',
                        (project_id, 'complete'))
         completed_runs = cursor.fetchone()['count']
 
         # Total records scraped
         cursor.execute(
-            'SELECT SUM(records_count) as total FROM runs WHERE project_id = ?', (project_id,))
+            'SELECT SUM(records_count) as total FROM runs WHERE project_id = %s', (project_id,))
         total_records = cursor.fetchone()['total'] or 0
 
         # Average duration
         cursor.execute('''
             SELECT AVG(duration_seconds) as avg_duration FROM runs 
-            WHERE project_id = ? AND duration_seconds IS NOT NULL AND status = ?
+            WHERE project_id = %s AND duration_seconds IS NOT NULL AND status = %s
         ''', (project_id, 'complete'))
         avg_duration = cursor.fetchone()['avg_duration'] or 0
 
         # Latest run
         cursor.execute('''
             SELECT run_token, status, pages_scraped, start_time, records_count FROM runs 
-            WHERE project_id = ? ORDER BY created_at DESC LIMIT 1
+            WHERE project_id = %s ORDER BY created_at DESC LIMIT 1
         ''', (project_id,))
         latest_run = cursor.fetchone()
 
         # Pages scraped trend (last 10 runs)
         cursor.execute('''
             SELECT pages_scraped, start_time FROM runs 
-            WHERE project_id = ? ORDER BY created_at DESC LIMIT 10
+            WHERE project_id = %s ORDER BY created_at DESC LIMIT 10
         ''', (project_id,))
         pages_trend = [dict(row) for row in cursor.fetchall()]
 
@@ -846,7 +857,7 @@ class ParseHubDatabase:
     def get_all_analytics(self) -> list:
         """Get analytics for all projects"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute('SELECT token FROM projects')
         projects = cursor.fetchall()
@@ -867,9 +878,9 @@ class ParseHubDatabase:
 
             # Ensure project exists
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
             cursor.execute(
-                'SELECT id FROM projects WHERE token = ?', (project_token,))
+                'SELECT id FROM projects WHERE token = %s', (project_token,))
             project = cursor.fetchone()
             self.disconnect()
 
@@ -901,10 +912,10 @@ class ParseHubDatabase:
     def export_data(self, project_token: str, format: str = 'json') -> str | None:
         """Export all project data"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute(
-            'SELECT id FROM projects WHERE token = ?', (project_token,))
+            'SELECT id FROM projects WHERE token = %s', (project_token,))
         project = cursor.fetchone()
 
         if not project:
@@ -915,7 +926,7 @@ class ParseHubDatabase:
 
         cursor.execute('''
             SELECT run_token, status, pages_scraped, start_time, records_count 
-            FROM runs WHERE project_id = ? ORDER BY created_at DESC
+            FROM runs WHERE project_id = %s ORDER BY created_at DESC
         ''', (project_id,))
 
         runs = [dict(row) for row in cursor.fetchall()]
@@ -933,13 +944,13 @@ class ParseHubDatabase:
                                   last_product_url: str, last_product_name: str = None) -> int:
         """Create a new recovery operation record"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute('''
             INSERT INTO recovery_operations 
             (original_run_id, project_id, last_product_url, last_product_name, 
              stopped_timestamp, recovery_triggered_timestamp, status)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'pending')
+            VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'pending')
         ''', (original_run_id, project_id, last_product_url, last_product_name))
 
         conn.commit()
@@ -950,12 +961,12 @@ class ParseHubDatabase:
     def link_recovery_run(self, recovery_operation_id: int, recovery_run_id: int):
         """Link a recovery run to a recovery operation"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute('''
             UPDATE recovery_operations 
-            SET recovery_run_id = ?, recovery_started_timestamp = CURRENT_TIMESTAMP, status = 'in_progress'
-            WHERE id = ?
+            SET recovery_run_id = %s, recovery_started_timestamp = CURRENT_TIMESTAMP, status = 'in_progress'
+            WHERE id = %s
         ''', (recovery_run_id, recovery_operation_id))
 
         conn.commit()
@@ -965,15 +976,15 @@ class ParseHubDatabase:
                                     final_count: int, duplicates: int):
         """Mark recovery operation as complete"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute('''
             UPDATE recovery_operations 
             SET recovery_completed_timestamp = CURRENT_TIMESTAMP, 
                 status = 'completed',
-                final_data_count = ?,
-                duplicates_removed = ?
-            WHERE id = ?
+                final_data_count = %s,
+                duplicates_removed = %s
+            WHERE id = %s
         ''', (final_count, duplicates, recovery_operation_id))
 
         conn.commit()
@@ -982,11 +993,11 @@ class ParseHubDatabase:
     def get_last_product(self, run_id: int) -> dict:
         """Get the last product scraped from a run"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         cursor.execute('''
             SELECT data_key, data_value FROM scraped_data 
-            WHERE run_id = ? 
+            WHERE run_id = %s 
             ORDER BY created_at DESC 
             LIMIT 1
         ''', (run_id,))
@@ -998,7 +1009,7 @@ class ParseHubDatabase:
     def get_run_data_summary(self, run_id: int) -> dict:
         """Get summary of all data for a run"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         # Get run info
         cursor.execute('''
@@ -1006,7 +1017,7 @@ class ParseHubDatabase:
                    r.records_count, p.token as project_token
             FROM runs r
             JOIN projects p ON r.project_id = p.id
-            WHERE r.id = ?
+            WHERE r.id = %s
         ''', (run_id,))
 
         run_info = cursor.fetchone()
@@ -1018,7 +1029,7 @@ class ParseHubDatabase:
         # Get sample of data
         cursor.execute('''
             SELECT data_key, data_value FROM scraped_data 
-            WHERE run_id = ? 
+            WHERE run_id = %s 
             ORDER BY created_at DESC 
             LIMIT 5
         ''', (run_id,))
@@ -1040,7 +1051,7 @@ class ParseHubDatabase:
     def get_unique_product_urls(self, run_id: int) -> list:
         """Extract unique product URLs from scraped data"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         # Try common field names for URLs
         url_fields = ['url', 'product_url', 'link', 'href', 'page_url']
@@ -1048,7 +1059,7 @@ class ParseHubDatabase:
         for field in url_fields:
             cursor.execute('''
                 SELECT DISTINCT data_value FROM scraped_data 
-                WHERE run_id = ? AND data_key = ? AND data_value LIKE 'http%'
+                WHERE run_id = %s AND data_key = %s AND data_value LIKE 'http%'
                 ORDER BY created_at DESC
             ''', (run_id, field))
 
@@ -1063,7 +1074,7 @@ class ParseHubDatabase:
     def record_data_lineage(self, run_id: int, product_urls: list, recovery_op_id: int = None):
         """Record which products came from which run for deduplication"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         for url in product_urls:
             # Create hash of URL for quick duplicate detection
@@ -1073,7 +1084,7 @@ class ParseHubDatabase:
             cursor.execute('''
                 INSERT INTO data_lineage 
                 (source_run_id, recovery_operation_id, product_url, product_hash)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             ''', (run_id, recovery_op_id, url, product_hash))
 
         conn.commit()
@@ -1082,12 +1093,12 @@ class ParseHubDatabase:
     def get_recovery_status(self, project_id: int) -> dict:
         """Get current recovery status for a project"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         # Latest recovery operation
         cursor.execute('''
             SELECT * FROM recovery_operations 
-            WHERE project_id = ? 
+            WHERE project_id = %s 
             ORDER BY created_at DESC 
             LIMIT 1
         ''', (project_id,))
@@ -1115,14 +1126,14 @@ class ParseHubDatabase:
     def get_analytics_data(self, project_id: int) -> dict:
         """Get comprehensive analytics for a project"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         # Get all runs for this project
         cursor.execute('''
             SELECT id, run_token, status, pages_scraped, start_time, 
                    end_time, duration_seconds, records_count, created_at
             FROM runs 
-            WHERE project_id = ? 
+            WHERE project_id = %s 
             ORDER BY created_at DESC
         ''', (project_id,))
 
@@ -1131,7 +1142,7 @@ class ParseHubDatabase:
         # Get total and unique records
         cursor.execute('''
             SELECT COUNT(*) as total_records FROM scraped_data
-            WHERE project_id = ?
+            WHERE project_id = %s
         ''', (project_id,))
 
         total_records = cursor.fetchone()['total_records']
@@ -1139,7 +1150,7 @@ class ParseHubDatabase:
         # Get latest run info
         cursor.execute('''
             SELECT records_count, pages_scraped, status FROM runs
-            WHERE project_id = ?
+            WHERE project_id = %s
             ORDER BY created_at DESC
             LIMIT 1
         ''', (project_id,))
@@ -1199,13 +1210,13 @@ class ParseHubDatabase:
             target_pages: Number of pages to scrape
         """
         self.connect()
-        cursor = self.connection.cursor()
+        cursor = self.cursor()
 
         try:
             # First, add the project
             cursor.execute('''
                 INSERT INTO projects (token, title, url)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
             ''', (token, title, url))
 
             project_id = cursor.lastrowid
@@ -1214,14 +1225,14 @@ class ParseHubDatabase:
             cursor.execute('''
                 INSERT INTO run_checkpoints 
                 (project_id, checkpoint_type, checkpoint_data, created_at)
-                VALUES (?, 'target_pages', ?, datetime('now'))
+                VALUES (%s, 'target_pages', %s, CURRENT_TIMESTAMP)
             ''', (project_id, json.dumps({
                 'target_pages': target_pages,
                 'url': url,
                 'created_at': datetime.now().isoformat()
             })))
 
-            self.connection.commit()
+            self.conn.commit()
             return True
         except Exception as e:
             print(f"Error creating project with pages: {e}")
@@ -1237,13 +1248,13 @@ class ParseHubDatabase:
             Page number or None if no pages scraped
         """
         self.connect()
-        cursor = self.connection.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 SELECT json_extract(data, '$.page_number') as page_number
                 FROM scraped_data
-                WHERE project_id = ?
+                WHERE project_id = %s
                 ORDER BY CAST(json_extract(data, '$.page_number') AS INTEGER) DESC
                 LIMIT 1
             ''', (project_id,))
@@ -1259,13 +1270,13 @@ class ParseHubDatabase:
     def get_total_scraped_count(self, project_id: int) -> int:
         """Get total number of records scraped for a project"""
         self.connect()
-        cursor = self.connection.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 SELECT COUNT(*) as total
                 FROM scraped_data
-                WHERE project_id = ?
+                WHERE project_id = %s
             ''', (project_id,))
 
             result = cursor.fetchone()
@@ -1279,13 +1290,13 @@ class ParseHubDatabase:
     def get_target_pages(self, project_id: int) -> Optional[int]:
         """Get the target page count for a project"""
         self.connect()
-        cursor = self.connection.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 SELECT checkpoint_data
                 FROM run_checkpoints
-                WHERE project_id = ? AND checkpoint_type = 'target_pages'
+                WHERE project_id = %s AND checkpoint_type = 'target_pages'
                 ORDER BY created_at DESC
                 LIMIT 1
             ''', (project_id,))
@@ -1313,7 +1324,7 @@ class ParseHubDatabase:
             data: Scraped data (dict)
         """
         self.connect()
-        cursor = self.connection.cursor()
+        cursor = self.cursor()
 
         try:
             # Add page_number to data
@@ -1322,21 +1333,21 @@ class ParseHubDatabase:
 
             cursor.execute('''
                 INSERT INTO scraped_data (run_id, project_id, data)
-                VALUES (?, ?, ?)
+                VALUES (%s, %s, %s)
             ''', (run_id, project_id, json.dumps(data_with_page)))
 
             # Update run checkpoint
             cursor.execute('''
                 INSERT OR REPLACE INTO run_checkpoints
                 (project_id, checkpoint_type, checkpoint_data, created_at)
-                VALUES (?, 'last_page', ?, datetime('now'))
+                VALUES (%s, 'last_page', %s, CURRENT_TIMESTAMP)
             ''', (project_id, json.dumps({
                 'last_page': page_number,
                 'total_records': self.get_total_scraped_count(project_id),
                 'timestamp': datetime.now().isoformat()
             })))
 
-            self.connection.commit()
+            self.conn.commit()
             return True
         except Exception as e:
             print(f"Error recording scraped data with page: {e}")
@@ -1358,14 +1369,14 @@ class ParseHubDatabase:
             }
         """
         self.connect()
-        cursor = self.connection.cursor()
+        cursor = self.cursor()
 
         try:
             # Get last page and target pages
             cursor.execute('''
                 SELECT checkpoint_data
                 FROM run_checkpoints
-                WHERE project_id = ? AND checkpoint_type IN ('last_page', 'target_pages')
+                WHERE project_id = %s AND checkpoint_type IN ('last_page', 'target_pages')
                 ORDER BY created_at DESC
             ''', (project_id,))
 
@@ -1418,13 +1429,13 @@ class ParseHubDatabase:
             Session ID or None if failed
         """
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 INSERT INTO monitoring_sessions 
                 (project_id, run_token, target_pages, status, start_time, created_at, updated_at)
-                VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ''', (project_id, run_token, target_pages))
 
             conn.commit()
@@ -1456,34 +1467,34 @@ class ParseHubDatabase:
             True if update successful, False otherwise
         """
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             update_fields = ['updated_at = CURRENT_TIMESTAMP']
             update_params = []
 
             if status is not None:
-                update_fields.append('status = ?')
+                update_fields.append('status = %s')
                 update_params.append(status)
 
             if total_records is not None:
-                update_fields.append('total_records = ?')
+                update_fields.append('total_records = %s')
                 update_params.append(total_records)
 
             if total_pages is not None:
-                update_fields.append('total_pages = ?')
+                update_fields.append('total_pages = %s')
                 update_params.append(total_pages)
 
             if progress_percentage is not None:
-                update_fields.append('progress_percentage = ?')
+                update_fields.append('progress_percentage = %s')
                 update_params.append(progress_percentage)
 
             if current_url is not None:
-                update_fields.append('current_url = ?')
+                update_fields.append('current_url = %s')
                 update_params.append(current_url)
 
             if error_message is not None:
-                update_fields.append('error_message = ?')
+                update_fields.append('error_message = %s')
                 update_params.append(error_message)
 
             if status == 'completed' or status == 'failed':
@@ -1494,7 +1505,7 @@ class ParseHubDatabase:
             query = f'''
                 UPDATE monitoring_sessions 
                 SET {', '.join(update_fields)}
-                WHERE id = ?
+                WHERE id = %s
             '''
 
             cursor.execute(query, tuple(update_params))
@@ -1524,7 +1535,7 @@ class ParseHubDatabase:
         import hashlib
 
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         records_stored = 0
 
@@ -1538,7 +1549,7 @@ class ParseHubDatabase:
                     cursor.execute('''
                         INSERT INTO scraped_records 
                         (session_id, project_id, run_token, page_number, data_hash, data_json)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s)
                     ''', (session_id, project_id, run_token, page_number, data_hash, record_json))
                     records_stored += 1
                 except sqlite3.IntegrityError:
@@ -1566,15 +1577,15 @@ class ParseHubDatabase:
             List of records as dicts
         """
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 SELECT id, page_number, data_json, created_at
                 FROM scraped_records
-                WHERE session_id = ?
+                WHERE session_id = %s
                 ORDER BY created_at ASC
-                LIMIT ? OFFSET ?
+                LIMIT %s OFFSET %s
             ''', (session_id, limit, offset))
 
             records = cursor.fetchall()
@@ -1599,11 +1610,11 @@ class ParseHubDatabase:
     def get_session_records_count(self, session_id: int) -> int:
         """Get total number of records in a session"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
-                SELECT COUNT(*) as total FROM scraped_records WHERE session_id = ?
+                SELECT COUNT(*) as total FROM scraped_records WHERE session_id = %s
             ''', (session_id,))
 
             result = cursor.fetchone()
@@ -1625,7 +1636,7 @@ class ParseHubDatabase:
             Session summary dict with status, counts, timing
         """
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
@@ -1633,7 +1644,7 @@ class ParseHubDatabase:
                        start_time, end_time, total_records, total_pages, 
                        progress_percentage, current_url, error_message, created_at
                 FROM monitoring_sessions
-                WHERE id = ?
+                WHERE id = %s
             ''', (session_id,))
 
             session = cursor.fetchone()
@@ -1647,7 +1658,7 @@ class ParseHubDatabase:
                        COUNT(DISTINCT page_number) as pages,
                        MAX(page_number) as max_page
                 FROM scraped_records
-                WHERE session_id = ?
+                WHERE session_id = %s
             ''', (session_id,))
 
             counts = cursor.fetchone()
@@ -1736,12 +1747,12 @@ class ParseHubDatabase:
             Latest session summary or None
         """
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 SELECT id FROM monitoring_sessions
-                WHERE project_id = ?
+                WHERE project_id = %s
                 ORDER BY created_at DESC
                 LIMIT 1
             ''', (project_id,))
@@ -1776,7 +1787,7 @@ class ParseHubDatabase:
             if not conn:
                 raise Exception("Failed to establish database connection")
 
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             # Validate and serialize analytics data
             try:
@@ -1813,7 +1824,7 @@ class ParseHubDatabase:
                     INSERT OR REPLACE INTO analytics_cache
                     (project_token, run_token, total_records, total_fields, total_runs, completed_runs, 
                      progress_percentage, status, analytics_json, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ''', (
                     project_token,
                     run_token,
@@ -1836,7 +1847,7 @@ class ParseHubDatabase:
                     cursor.execute('''
                         INSERT OR REPLACE INTO csv_exports
                         (project_token, run_token, csv_data, row_count, updated_at)
-                        VALUES (?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s)
                     ''', (
                         project_token,
                         run_token,
@@ -1859,7 +1870,7 @@ class ParseHubDatabase:
                         cursor.execute('''
                             INSERT OR REPLACE INTO analytics_records
                             (project_token, run_token, record_index, record_data)
-                            VALUES (?, ?, ?, ?)
+                            VALUES (%s, %s, %s, %s)
                         ''', (
                             project_token,
                             run_token,
@@ -1889,14 +1900,14 @@ class ParseHubDatabase:
         """Retrieve stored analytics data"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             # Get analytics cache
             cursor.execute('''
                 SELECT project_token, run_token, total_records, total_fields, total_runs, 
                        completed_runs, progress_percentage, status, analytics_json, updated_at
                 FROM analytics_cache
-                WHERE project_token = ?
+                WHERE project_token = %s
                 ORDER BY updated_at DESC
                 LIMIT 1
             ''', (project_token,))
@@ -1912,7 +1923,7 @@ class ParseHubDatabase:
             # Get CSV data
             cursor.execute('''
                 SELECT csv_data FROM csv_exports
-                WHERE project_token = ?
+                WHERE project_token = %s
                 ORDER BY updated_at DESC
                 LIMIT 1
             ''', (project_token,))
@@ -1924,7 +1935,7 @@ class ParseHubDatabase:
             # Get records
             cursor.execute('''
                 SELECT record_data FROM analytics_records
-                WHERE project_token = ?
+                WHERE project_token = %s
                 ORDER BY record_index ASC
             ''', (project_token,))
 
@@ -1950,14 +1961,14 @@ class ParseHubDatabase:
         """Clear analytics data for a project"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute(
-                'DELETE FROM analytics_cache WHERE project_token = ?', (project_token,))
+                'DELETE FROM analytics_cache WHERE project_token = %s', (project_token,))
             cursor.execute(
-                'DELETE FROM csv_exports WHERE project_token = ?', (project_token,))
+                'DELETE FROM csv_exports WHERE project_token = %s', (project_token,))
             cursor.execute(
-                'DELETE FROM analytics_records WHERE project_token = ?', (project_token,))
+                'DELETE FROM analytics_records WHERE project_token = %s', (project_token,))
 
             conn.commit()
             self.disconnect()
@@ -1974,11 +1985,11 @@ class ParseHubDatabase:
         """Create an import batch record and return batch_id"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute('''
                 INSERT INTO import_batches (file_name, record_count, uploaded_by, status)
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
             ''', (file_name, record_count, uploaded_by, 'success'))
 
             conn.commit()
@@ -1999,14 +2010,14 @@ class ParseHubDatabase:
         """Add or update a metadata record"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute('''
                 INSERT OR REPLACE INTO metadata 
                 (personal_project_id, project_id, project_token, project_name, 
                  region, country, brand, website_url, total_pages, total_products,
                  import_batch_id, updated_date, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ''', (
                 personal_project_id, project_id, project_token, project_name,
                 region, country, brand, website_url, total_pages, total_products,
@@ -2028,26 +2039,26 @@ class ParseHubDatabase:
         """Get metadata records with optional filters"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             query = "SELECT * FROM metadata WHERE 1=1"
             params = []
 
             if project_token:
-                query += " AND project_token = ?"
+                query += " AND project_token = %s"
                 params.append(project_token)
             if region:
-                query += " AND region = ?"
+                query += " AND region = %s"
                 params.append(region)
             if country:
-                query += " AND country = ?"
+                query += " AND country = %s"
                 params.append(country)
             if brand:
-                query += " AND brand = ?"
+                query += " AND brand = %s"
                 params.append(brand)
 
             # Sort by updated_date descending
-            query += " ORDER BY updated_date DESC LIMIT ? OFFSET ?"
+            query += " ORDER BY updated_date DESC LIMIT %s OFFSET %s"
             params.extend([limit, offset])
 
             cursor.execute(query, params)
@@ -2065,10 +2076,10 @@ class ParseHubDatabase:
         """Get a specific metadata record by ID"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute(
-                "SELECT * FROM metadata WHERE id = ?", (metadata_id,))
+                "SELECT * FROM metadata WHERE id = %s", (metadata_id,))
             record = cursor.fetchone()
 
             self.disconnect()
@@ -2085,27 +2096,27 @@ class ParseHubDatabase:
         """Update scraping progress in metadata"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
-            updates = ["updated_date = ?"]
+            updates = ["updated_date = %s"]
             params = [datetime.now().isoformat()]
 
             if current_page_scraped is not None:
-                updates.append("current_page_scraped = ?")
+                updates.append("current_page_scraped = %s")
                 params.append(current_page_scraped)
             if current_product_scraped is not None:
-                updates.append("current_product_scraped = ?")
+                updates.append("current_product_scraped = %s")
                 params.append(current_product_scraped)
             if last_known_url is not None:
-                updates.append("last_known_url = ?")
+                updates.append("last_known_url = %s")
                 params.append(last_known_url)
             if last_run_date is not None:
-                updates.append("last_run_date = ?")
+                updates.append("last_run_date = %s")
                 params.append(last_run_date)
 
             params.append(metadata_id)
 
-            query = f"UPDATE metadata SET {', '.join(updates)} WHERE id = ?"
+            query = f"UPDATE metadata SET {', '.join(updates)} WHERE id = %s"
             cursor.execute(query, params)
 
             conn.commit()
@@ -2121,7 +2132,7 @@ class ParseHubDatabase:
         """Get distinct values for a filter (region, country, brand)"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             if filter_type not in ['region', 'country', 'brand']:
                 return []
@@ -2142,10 +2153,10 @@ class ParseHubDatabase:
         """Get metadata by personal project ID"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute(
-                "SELECT * FROM metadata WHERE personal_project_id = ?", (personal_project_id,))
+                "SELECT * FROM metadata WHERE personal_project_id = %s", (personal_project_id,))
             record = cursor.fetchone()
 
             self.disconnect()
@@ -2160,9 +2171,9 @@ class ParseHubDatabase:
         """Delete a metadata record"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
-            cursor.execute("DELETE FROM metadata WHERE id = ?", (metadata_id,))
+            cursor.execute("DELETE FROM metadata WHERE id = %s", (metadata_id,))
 
             conn.commit()
             self.disconnect()
@@ -2177,13 +2188,13 @@ class ParseHubDatabase:
         """Get import batch history"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute("""
                 SELECT id, file_name, record_count, status, uploaded_by, upload_date 
                 FROM import_batches 
                 ORDER BY upload_date DESC 
-                LIMIT ? OFFSET ?
+                LIMIT %s OFFSET %s
             """, (limit, offset))
 
             records = cursor.fetchall()
@@ -2200,7 +2211,7 @@ class ParseHubDatabase:
         """Sync projects from ParseHub API to database (insert/update)"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             inserted = 0
             updated = 0
@@ -2217,7 +2228,7 @@ class ParseHubDatabase:
                 # Try to insert, update if exists
                 cursor.execute('''
                     INSERT INTO projects (token, title, owner_email, main_site, updated_at)
-                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT(token) DO UPDATE SET
                         title = excluded.title,
                         owner_email = excluded.owner_email,
@@ -2226,7 +2237,7 @@ class ParseHubDatabase:
                 ''', (token, title, owner_email, main_site))
 
                 cursor.execute(
-                    'SELECT id FROM projects WHERE token = ?', (token,))
+                    'SELECT id FROM projects WHERE token = %s', (token,))
                 result = cursor.fetchone()
 
                 if cursor.rowcount > 0:
@@ -2263,7 +2274,7 @@ class ParseHubDatabase:
         """
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             def normalize(text: str) -> str:
                 return ' '.join((text or '').strip().lower().split())
@@ -2307,7 +2318,7 @@ class ParseHubDatabase:
                     continue
 
                 cursor.execute(
-                    'SELECT id FROM projects WHERE token = ?', (token,))
+                    'SELECT id FROM projects WHERE token = %s', (token,))
                 project_row = cursor.fetchone()
                 if not project_row:
                     skipped += 1
@@ -2339,15 +2350,15 @@ class ParseHubDatabase:
                 try:
                     cursor.execute('''
                         UPDATE metadata
-                        SET project_id = ?,
-                            project_token = ?,
-                            updated_date = ?
-                        WHERE id = ?
+                        SET project_id = %s,
+                            project_token = %s,
+                            updated_date = %s
+                        WHERE id = %s
                     ''', (project_id, token, datetime.now().isoformat(), matched_metadata_id))
 
                     cursor.execute('''
                         INSERT OR IGNORE INTO project_metadata (project_id, metadata_id)
-                        VALUES (?, ?)
+                        VALUES (%s, %s)
                     ''', (project_id, matched_metadata_id))
 
                     linked += 1
@@ -2388,7 +2399,7 @@ class ParseHubDatabase:
                 # Search for matching project by name
                 cursor.execute('''
                     SELECT id FROM projects 
-                    WHERE LOWER(title) LIKE ?
+                    WHERE LOWER(title) LIKE %s
                     LIMIT 1
                 ''', (f'%{project_name}%',))
 
@@ -2399,7 +2410,7 @@ class ParseHubDatabase:
                     try:
                         cursor.execute('''
                             INSERT OR IGNORE INTO project_metadata (project_id, metadata_id)
-                            VALUES (?, ?)
+                            VALUES (%s, %s)
                         ''', (project_id, metadata_id))
                     except:
                         pass  # Link already exists
@@ -2413,7 +2424,7 @@ class ParseHubDatabase:
         """Get projects joined with metadata, with optional filtering"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             # Build base query
             base_query = '''
@@ -2427,21 +2438,22 @@ class ParseHubDatabase:
             params = []
 
             if region:
-                base_query += ' AND m.region = ?'
+                base_query += ' AND m.region = %s'
                 params.append(region)
 
             if country:
-                base_query += ' AND m.country = ?'
+                base_query += ' AND m.country = %s'
                 params.append(country)
 
             if brand:
-                base_query += ' AND m.brand = ?'
+                base_query += ' AND m.brand = %s'
                 params.append(brand)
 
             # Count total with filters
-            count_query = f"SELECT COUNT(*) FROM ({base_query}) as count_subquery"
+            count_query = f"SELECT COUNT(*) AS c FROM ({base_query}) as count_subquery"
             cursor.execute(count_query, params)
-            total = cursor.fetchone()[0]
+            r = cursor.fetchone()
+            total = r['c'] if isinstance(r, dict) else r[0]
 
             # Get full results with pagination
             full_query = '''
@@ -2459,51 +2471,53 @@ class ParseHubDatabase:
             filter_params = []
 
             if region:
-                full_query += ' AND m.region = ?'
+                full_query += ' AND m.region = %s'
                 filter_params.append(region)
 
             if country:
-                full_query += ' AND m.country = ?'
+                full_query += ' AND m.country = %s'
                 filter_params.append(country)
 
             if brand:
-                full_query += ' AND m.brand = ?'
+                full_query += ' AND m.brand = %s'
                 filter_params.append(brand)
 
             # Add ordering and pagination
-            full_query += ' ORDER BY p.updated_at DESC LIMIT ? OFFSET ?'
+            full_query += ' ORDER BY p.updated_at DESC LIMIT %s OFFSET %s'
             filter_params.extend([limit, offset])
 
             cursor.execute(full_query, filter_params)
             rows = cursor.fetchall()
 
-            # Group results: one project with all its metadata
+            # Group results: one project with all its metadata (row is dict with RealDictCursor / or Row)
             projects_dict = {}
             for row in rows:
-                project_id = row[0]
+                r = row if isinstance(row, dict) else row
+                project_id = r.get('id') if isinstance(r, dict) else row[0]
 
                 if project_id not in projects_dict:
                     projects_dict[project_id] = {
-                        'id': row[0],
-                        'token': row[1],
-                        'title': row[2],
-                        'owner_email': row[3],
-                        'main_site': row[4],
-                        'created_at': row[5],
-                        'updated_at': row[6],
+                        'id': r.get('id') if isinstance(r, dict) else row[0],
+                        'token': r.get('token') if isinstance(r, dict) else row[1],
+                        'title': r.get('title') if isinstance(r, dict) else row[2],
+                        'owner_email': r.get('owner_email') if isinstance(r, dict) else row[3],
+                        'main_site': r.get('main_site') if isinstance(r, dict) else row[4],
+                        'created_at': r.get('created_at') if isinstance(r, dict) else row[5],
+                        'updated_at': r.get('updated_at') if isinstance(r, dict) else row[6],
                         'metadata': []
                     }
 
                 # Add metadata if present
-                if row[7]:  # metadata_id
+                mid = r.get('metadata_id') if isinstance(r, dict) else row[7]
+                if mid:
                     projects_dict[project_id]['metadata'].append({
-                        'id': row[7],
-                        'region': row[8],
-                        'country': row[9],
-                        'brand': row[10],
-                        'project_name': row[11],
-                        'website_url': row[12],
-                        'status': row[13]
+                        'id': mid,
+                        'region': r.get('region') if isinstance(r, dict) else row[8],
+                        'country': r.get('country') if isinstance(r, dict) else row[9],
+                        'brand': r.get('brand') if isinstance(r, dict) else row[10],
+                        'project_name': r.get('project_name') if isinstance(r, dict) else row[11],
+                        'website_url': r.get('website_url') if isinstance(r, dict) else row[12],
+                        'status': r.get('status') if isinstance(r, dict) else row[13]
                     })
 
             self.disconnect()
@@ -2525,10 +2539,11 @@ class ParseHubDatabase:
         """Get total count of synced projects"""
         try:
             conn = self.connect()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
-            cursor.execute('SELECT COUNT(*) FROM projects')
-            count = cursor.fetchone()[0]
+            cursor.execute('SELECT COUNT(*) AS c FROM projects')
+            r = cursor.fetchone()
+            count = r['c'] if isinstance(r, dict) else r[0]
 
             self.disconnect()
             return count
@@ -2573,7 +2588,7 @@ class ParseHubDatabase:
 
             # Create a fresh connection for this operation (thread-safe)
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute(
                 f"SELECT DISTINCT {field} FROM metadata WHERE {field} IS NOT NULL AND {field} != '' ORDER BY {field}")
@@ -2591,7 +2606,7 @@ class ParseHubDatabase:
         try:
             # Create a fresh connection for this operation (thread-safe)
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute(
                 'SELECT DISTINCT title FROM projects ORDER BY title')
@@ -2621,7 +2636,7 @@ class ParseHubDatabase:
         try:
             # Create a fresh connection for this operation (thread-safe)
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             # Build query with metadata joins and filtering
             base_query = '''
@@ -2639,15 +2654,15 @@ class ParseHubDatabase:
 
             # Apply metadata filters
             if region:
-                base_query += ' AND m.region = ?'
+                base_query += ' AND m.region = %s'
                 params.append(region)
 
             if country:
-                base_query += ' AND m.country = ?'
+                base_query += ' AND m.country = %s'
                 params.append(country)
 
             if brand:
-                base_query += ' AND m.brand = ?'
+                base_query += ' AND m.brand = %s'
                 params.append(brand)
 
             # For website filter, we need to match against extracted website from title
@@ -2656,11 +2671,11 @@ class ParseHubDatabase:
             # For count: execute a simpler query
             count_query = 'SELECT COUNT(DISTINCT p.id) FROM projects p LEFT JOIN project_metadata pm ON p.id = pm.project_id LEFT JOIN metadata m ON pm.metadata_id = m.id WHERE 1=1'
             if region:
-                count_query += ' AND m.region = ?'
+                count_query += ' AND m.region = %s'
             if country:
-                count_query += ' AND m.country = ?'
+                count_query += ' AND m.country = %s'
             if brand:
-                count_query += ' AND m.brand = ?'
+                count_query += ' AND m.brand = %s'
 
             try:
                 cursor.execute(count_query, params)
@@ -2765,12 +2780,12 @@ class ParseHubDatabase:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             query = '''
                 SELECT id, token, title, owner_email, main_site, created_at, updated_at
                 FROM projects
-                WHERE token = ?
+                WHERE token = %s
             '''
 
             cursor.execute(query, (token,))
@@ -2797,7 +2812,7 @@ class ParseHubDatabase:
                 SELECT run_token, status, pages_scraped, start_time, end_time, 
                        duration_seconds, created_at, updated_at
                 FROM runs
-                WHERE project_id = ?
+                WHERE project_id = %s
                 ORDER BY created_at DESC
                 LIMIT 1
             '''
@@ -2831,12 +2846,12 @@ class ParseHubDatabase:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             query = '''
                 SELECT id, token, title, owner_email, main_site, created_at, updated_at
                 FROM projects
-                WHERE id = ?
+                WHERE id = %s
             '''
             cursor.execute(query, (project_id,))
             row = cursor.fetchone()
@@ -2860,7 +2875,7 @@ class ParseHubDatabase:
                 SELECT run_token, status, pages_scraped, start_time, end_time,
                        duration_seconds, created_at, updated_at
                 FROM runs
-                WHERE project_id = ?
+                WHERE project_id = %s
                 ORDER BY created_at DESC
                 LIMIT 1
             '''
@@ -2893,9 +2908,9 @@ class ParseHubDatabase:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
-            cursor.execute('SELECT id FROM projects WHERE token = ?', (token,))
+            cursor.execute('SELECT id FROM projects WHERE token = %s', (token,))
             row = cursor.fetchone()
             conn.close()
 
@@ -2913,15 +2928,15 @@ class ParseHubDatabase:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             query = '''
                 SELECT m.id, m.region, m.country, m.brand, m.project_name, 
                        m.website_url, m.total_pages, m.total_products, m.status
                 FROM metadata m
-                WHERE m.project_token = ? OR m.id IN (
+                WHERE m.project_token = %s OR m.id IN (
                     SELECT metadata_id FROM project_metadata 
-                    WHERE project_id = (SELECT id FROM projects WHERE token = ?)
+                    WHERE project_id = (SELECT id FROM projects WHERE token = %s)
                 )
             '''
 
@@ -2955,7 +2970,7 @@ class ParseHubDatabase:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             # Get total runs and completed runs
             stats_query = '''
@@ -2968,7 +2983,7 @@ class ParseHubDatabase:
                     MAX(start_time) as last_run_date,
                     AVG(pages_scraped) as avg_pages_per_run
                 FROM runs
-                WHERE project_id = ?
+                WHERE project_id = %s
             '''
 
             cursor.execute(stats_query, (project_id,))
@@ -2987,7 +3002,7 @@ class ParseHubDatabase:
 
             # Get total_pages from project's metadata
             metadata_query = '''
-                SELECT total_pages FROM metadata WHERE project_id = ? LIMIT 1
+                SELECT total_pages FROM metadata WHERE project_id = %s LIMIT 1
             '''
             cursor.execute(metadata_query, (project_id,))
             metadata_row = cursor.fetchone()
@@ -3032,7 +3047,7 @@ class ParseHubDatabase:
         """
         try:
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             cursor.execute('SELECT * FROM metadata')
             rows = cursor.fetchall()
@@ -3140,11 +3155,11 @@ class ParseHubDatabase:
                 return {}
 
             conn = self._get_connection()
-            cursor = conn.cursor()
+            cursor = self.cursor()
 
             # Strategy 1: Match by website domain (case-insensitive)
             cursor.execute(
-                'SELECT * FROM metadata WHERE LOWER(project_name) = ? LIMIT 1',
+                'SELECT * FROM metadata WHERE LOWER(project_name) = %s LIMIT 1',
                 (website.lower(),)
             )
             row = cursor.fetchone()
@@ -3164,7 +3179,7 @@ class ParseHubDatabase:
 
             # Strategy 2: Match against website_url
             cursor.execute(
-                'SELECT * FROM metadata WHERE website_url = ? LIMIT 1',
+                'SELECT * FROM metadata WHERE website_url = %s LIMIT 1',
                 (website,)
             )
             row = cursor.fetchone()
@@ -3184,7 +3199,7 @@ class ParseHubDatabase:
 
             # Strategy 3: Partial match - search for website in project_name
             cursor.execute(
-                'SELECT * FROM metadata WHERE LOWER(project_name) LIKE ? LIMIT 1',
+                'SELECT * FROM metadata WHERE LOWER(project_name) LIKE %s LIMIT 1',
                 (f'%{website.lower()}%',)
             )
             row = cursor.fetchone()
@@ -3229,7 +3244,7 @@ class ParseHubDatabase:
             return {'success': False, 'error': 'No product data provided', 'inserted': 0}
 
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             # Standard column mapping with case-insensitive fallback
@@ -3284,23 +3299,23 @@ class ParseHubDatabase:
                     # Prepare insert statement
                     columns = ['project_id']
                     values = [project_id]
-                    placeholders = ['?']
+                    placeholders = ['%s']
 
                     if run_id:
                         columns.append('run_id')
                         values.append(run_id)
-                        placeholders.append('?')
+                        placeholders.append('%s')
 
                     if run_token:
                         columns.append('run_token')
                         values.append(run_token)
-                        placeholders.append('?')
+                        placeholders.append('%s')
 
                     # Add product data columns
                     for key, value in normalized_data.items():
                         columns.append(key)
                         values.append(value)
-                        placeholders.append('?')
+                        placeholders.append('%s')
 
                     # Insert or update
                     insert_sql = f'''
@@ -3333,14 +3348,14 @@ class ParseHubDatabase:
     def get_product_data_by_project(self, project_id: int, limit: int = 1000, offset: int = 0) -> list:
         """Get all product data for a specific project"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 SELECT * FROM product_data
-                WHERE project_id = ?
+                WHERE project_id = %s
                 ORDER BY extraction_date DESC, page_number ASC
-                LIMIT ? OFFSET ?
+                LIMIT %s OFFSET %s
             ''', (project_id, limit, offset))
 
             rows = cursor.fetchall()
@@ -3355,14 +3370,14 @@ class ParseHubDatabase:
     def get_product_data_by_run(self, run_token: str, limit: int = 1000) -> list:
         """Get all product data for a specific run"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             cursor.execute('''
                 SELECT * FROM product_data
-                WHERE run_token = ?
+                WHERE run_token = %s
                 ORDER BY page_number ASC
-                LIMIT ?
+                LIMIT %s
             ''', (run_token, limit))
 
             rows = cursor.fetchall()
@@ -3377,32 +3392,35 @@ class ParseHubDatabase:
     def get_product_data_stats(self, project_id: int) -> dict:
         """Get statistics about product data for a project"""
         conn = self.connect()
-        cursor = conn.cursor()
+        cursor = self.cursor()
 
         try:
             # Total products
             cursor.execute(
-                'SELECT COUNT(*) FROM product_data WHERE project_id = ?', (project_id,))
-            total_count = cursor.fetchone()[0]
+                'SELECT COUNT(*) AS c FROM product_data WHERE project_id = %s', (project_id,))
+            r = cursor.fetchone()
+            total_count = r['c'] if isinstance(r, dict) else r[0]
 
             # Total runs with data
             cursor.execute('''
-                SELECT COUNT(DISTINCT run_token) FROM product_data 
-                WHERE project_id = ?
+                SELECT COUNT(DISTINCT run_token) AS c FROM product_data 
+                WHERE project_id = %s
             ''', (project_id,))
-            total_runs = cursor.fetchone()[0]
+            r = cursor.fetchone()
+            total_runs = r['c'] if isinstance(r, dict) else r[0]
 
             # Latest extraction date
             cursor.execute('''
-                SELECT MAX(extraction_date) FROM product_data 
-                WHERE project_id = ?
+                SELECT MAX(extraction_date) AS d FROM product_data 
+                WHERE project_id = %s
             ''', (project_id,))
-            latest_date = cursor.fetchone()[0]
+            r = cursor.fetchone()
+            latest_date = r['d'] if isinstance(r, dict) else r[0]
 
             # Brand counts
             cursor.execute('''
                 SELECT brand, COUNT(*) as count FROM product_data 
-                WHERE project_id = ? AND brand IS NOT NULL
+                WHERE project_id = %s AND brand IS NOT NULL
                 GROUP BY brand
                 ORDER BY count DESC
                 LIMIT 10
@@ -3413,7 +3431,7 @@ class ParseHubDatabase:
             # Country counts
             cursor.execute('''
                 SELECT country, COUNT(*) as count FROM product_data 
-                WHERE project_id = ? AND country IS NOT NULL
+                WHERE project_id = %s AND country IS NOT NULL
                 GROUP BY country
                 ORDER BY count DESC
                 LIMIT 10

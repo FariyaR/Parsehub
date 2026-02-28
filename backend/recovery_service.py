@@ -243,12 +243,12 @@ class RecoveryService:
         """
         try:
             conn = self.db.connect()
-            cursor = conn.cursor()
+            cursor = self.db.cursor()
 
             # Get URLs from original run
             cursor.execute('''
                 SELECT DISTINCT data_value FROM scraped_data 
-                WHERE run_id = ? AND data_key IN ('url', 'product_url')
+                WHERE run_id = %s AND data_key IN ('url', 'product_url')
             ''', (original_run_id,))
             
             original_urls = set(row['data_value'] for row in cursor.fetchall())
@@ -256,7 +256,7 @@ class RecoveryService:
             # Get URLs from recovery run
             cursor.execute('''
                 SELECT DISTINCT data_value FROM scraped_data 
-                WHERE run_id = ? AND data_key IN ('url', 'product_url')
+                WHERE run_id = %s AND data_key IN ('url', 'product_url')
             ''', (recovery_run_id,))
             
             recovery_urls = set(row['data_value'] for row in cursor.fetchall())
@@ -266,11 +266,13 @@ class RecoveryService:
             new_items = recovery_urls - original_urls
 
             # Count records
-            cursor.execute('SELECT records_count FROM runs WHERE id = ?', (original_run_id,))
-            original_count = cursor.fetchone()['records_count']
+            cursor.execute('SELECT records_count FROM runs WHERE id = %s', (original_run_id,))
+            r1 = cursor.fetchone()
+            original_count = r1['records_count'] if isinstance(r1, dict) else r1[0]
 
-            cursor.execute('SELECT records_count FROM runs WHERE id = ?', (recovery_run_id,))
-            recovery_count = cursor.fetchone()['records_count']
+            cursor.execute('SELECT records_count FROM runs WHERE id = %s', (recovery_run_id,))
+            r2 = cursor.fetchone()
+            recovery_count = r2['records_count'] if isinstance(r2, dict) else r2[0]
 
             total_unique = original_count + len(new_items)
 
@@ -301,35 +303,33 @@ class RecoveryService:
         """
         try:
             # Get project ID
-            conn = self.db.connect()
-            cursor = conn.cursor()
-            cursor.execute('SELECT id FROM projects WHERE token = ?', (project_token,))
+            self.db.connect()
+            cursor = self.db.cursor()
+            cursor.execute('SELECT id FROM projects WHERE token = %s', (project_token,))
             project = cursor.fetchone()
-            
             if not project:
+                self.db.disconnect()
                 return {'success': False, 'message': 'Project not found'}
-
-            project_id = project['id']
-            conn.close()
+            project_id = project['id'] if isinstance(project, dict) else project[0]
             self.db.disconnect()
 
             # Get latest run
-            cursor = conn.cursor()
+            conn = self.db.connect()
+            cursor = self.db.cursor()
             cursor.execute('''
                 SELECT id, run_token FROM runs 
-                WHERE project_id = ? 
+                WHERE project_id = %s 
                 ORDER BY created_at DESC 
                 LIMIT 1
             ''', (project_id,))
             
             latest_run = cursor.fetchone()
-            conn.close()
             self.db.disconnect()
 
             if not latest_run:
                 return {'success': False, 'message': 'No previous runs found'}
 
-            original_run_id = latest_run['id']
+            original_run_id = latest_run['id'] if isinstance(latest_run, dict) else latest_run[0]
 
             # Get last product
             last_product = self.get_last_product_url(latest_run['run_token'])
