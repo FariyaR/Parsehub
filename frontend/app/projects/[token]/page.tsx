@@ -196,7 +196,8 @@ export default function ProjectDetailsPage() {
       });
 
       if (projectResponse.ok) {
-        projectData = await projectResponse.json();
+        const raw = await projectResponse.json();
+        projectData = raw?.data ?? raw;
         setProject(projectData);
       }
 
@@ -461,7 +462,7 @@ export default function ProjectDetailsPage() {
     );
   }
 
-  const projectName = project.name || project.title || "Unknown";
+  const projectName = project.name || project.title || project.token || "Unknown";
   const lastRunStatus = project.last_run?.status || "not_run";
 
   return (
