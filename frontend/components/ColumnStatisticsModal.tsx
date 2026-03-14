@@ -1,6 +1,7 @@
 "use client";
 import apiClient from "@/lib/apiClient";
 import { getApiHeaders } from "@/lib/apiBase";
+import { getResponseMessage, readResponseData } from "@/lib/response";
 
 import { useState, useEffect } from "react";
 import { Download, BarChart3 } from "lucide-react";
@@ -51,14 +52,15 @@ export default function ColumnStatisticsModal({
             headers: getApiHeaders(),
           },
         );
+        const result = await readResponseData<Record<string, unknown>>(response);
 
-        if (!response.status || response.status >= 400) {
-          throw new Error(`API error: ${response.status}`);
+        if (!response.ok) {
+          throw new Error(
+            getResponseMessage(result, `API error: ${response.status}`),
+          );
         }
 
-        const result = response.data;
-
-        if (!result.csv_data) {
+        if (typeof result.csv_data !== "string" || !result.csv_data) {
           setError(
             "No CSV data found for this project. Try running the project first.",
           );

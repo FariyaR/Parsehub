@@ -1,6 +1,7 @@
 "use client";
 import apiClient from "@/lib/apiClient";
 import { getApiHeaders } from "@/lib/apiBase";
+import { getResponseMessage, readResponseData } from "@/lib/response";
 
 import { useState, useEffect } from "react";
 import { Download, Eye, FileJson, Loader2, FileText } from "lucide-react";
@@ -47,17 +48,19 @@ export default function CSVDataModal({
             headers: getApiHeaders(),
           },
         );
+        const result = await readResponseData<Record<string, unknown>>(response);
 
-        if (!response.status || response.status >= 400) {
+        if (!response.ok) {
           throw new Error(
-            `API error: ${response.status} ${response.statusText}`,
+            getResponseMessage(
+              result,
+              `API error: ${response.status} ${response.statusText}`,
+            ),
           );
         }
 
-        const result = response.data;
-
         // Extract CSV data
-        if (result.csv_data) {
+        if (typeof result.csv_data === "string" && result.csv_data) {
           setCSVData(result.csv_data);
           // Parse CSV to JSON for table view
           parseCSVToJSON(result.csv_data);

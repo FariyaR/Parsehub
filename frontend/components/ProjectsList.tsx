@@ -1,6 +1,7 @@
 "use client";
 import apiClient from "@/lib/apiClient";
 import { getApiHeaders } from "@/lib/apiBase";
+import { getResponseMessage, readResponseData } from "@/lib/response";
 import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -165,15 +166,14 @@ export default function ProjectsList({
           ...getApiHeaders(),
         },
       });
+      const data = await readResponseData<Record<string, unknown>>(response);
 
-      if (!response.status || response.status >= 400) {
-        const errorData = response.data;
+      if (!response.ok) {
         throw new Error(
-          errorData.message || `Failed to cancel run: ${response.statusText}`,
+          getResponseMessage(data, `Failed to cancel run: ${response.statusText}`),
         );
       }
 
-      const data = response.data;
       console.log("Run cancelled successfully:", data);
 
       // Trigger a refresh of projects to update status

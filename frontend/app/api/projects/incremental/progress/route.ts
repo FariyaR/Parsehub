@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { execSync } from 'child_process'
 import path from 'path'
 
+export const dynamic = 'force-dynamic'
+
 export async function GET(request: NextRequest) {
   try {
     const sessionId = request.nextUrl.searchParams.get('session_id')

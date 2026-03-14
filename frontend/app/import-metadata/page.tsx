@@ -1,6 +1,7 @@
 "use client";
 import apiClient from "@/lib/apiClient";
 import { getApiHeaders } from "@/lib/apiBase";
+import { getResponseMessage, readResponseData } from "@/lib/response";
 
 import { useEffect, useState, useRef } from "react";
 import {
@@ -88,14 +89,22 @@ export default function ImportMetadataPage() {
       });
 
       console.log("[Import] Import history response status:", response.status);
+      const data = await readResponseData<{
+        count?: number;
+        batches?: ImportHistory[];
+        error?: string;
+        message?: string;
+      }>(response);
 
-      if (response.status === 200) {
-        const data = response.data;
+      if (response.ok) {
         console.log("[Import] Successfully fetched import history -", data.count || 0, "batches");
         setImportHistory(data.batches || []);
       } else {
-        const errorData = response.data.catch(() => ({}));
-        console.error("[Import] Failed to fetch history:", response.status, errorData);
+        console.error(
+          "[Import] Failed to fetch history:",
+          response.status,
+          getResponseMessage(data, response.statusText),
+        );
       }
     } catch (err) {
       console.error("[Import] Error fetching history:", err);
@@ -180,10 +189,10 @@ export default function ImportMetadataPage() {
 
       console.log("[Import] Response status:", response.status, response.statusText);
 
-      const data: ImportResult = response.data;
+      const data = await readResponseData<ImportResult>(response);
       console.log("[Import] Response data:", data);
 
-      if (response.status === 200 && data.success) {
+      if (response.ok && data.success) {
         console.log("[Import] Successfully imported", data.stats?.imported, "records");
         setResult(data);
         setFile(null);
@@ -192,7 +201,7 @@ export default function ImportMetadataPage() {
         }
         await fetchImportHistory();
       } else {
-        const errorMsg = data.error || "Import failed";
+        const errorMsg = getResponseMessage(data, "Import failed");
         console.error("[Import] Import failed:", errorMsg, data);
         setError(errorMsg);
         setResult(data);

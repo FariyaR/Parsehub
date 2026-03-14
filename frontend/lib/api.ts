@@ -1,12 +1,14 @@
 import { getFrontendApiUrl, getApiHeaders } from "./apiBase";
+import { getResponseMessage, readResponseData } from "./response";
 export const API_URL = getFrontendApiUrl();
 
 export async function fetchProjects() {
   const response = await fetch(`${API_URL}/api/projects`, {
     headers: getApiHeaders(),
   });
-  if (!response.status === 200) throw new Error('Failed to fetch projects');
-  return response.json();
+  const data = await readResponseData(response);
+  if (!response.ok) throw new Error(getResponseMessage(data, 'Failed to fetch projects'));
+  return data;
 }
 
 export async function runProject(token: string) {
@@ -15,8 +17,9 @@ export async function runProject(token: string) {
     headers: { 'Content-Type': 'application/json', ...getApiHeaders() },
     body: JSON.stringify({ token }),
   });
-  if (!response.status === 200) throw new Error('Failed to run project');
-  return response.json();
+  const data = await readResponseData(response);
+  if (!response.ok) throw new Error(getResponseMessage(data, 'Failed to run project'));
+  return data;
 }
 
 export async function runAllProjects() {
@@ -24,8 +27,9 @@ export async function runAllProjects() {
     method: 'POST',
     headers: getApiHeaders(),
   });
-  if (!response.status === 200) throw new Error('Failed to run all projects');
-  return response.json();
+  const data = await readResponseData(response);
+  if (!response.ok) throw new Error(getResponseMessage(data, 'Failed to run all projects'));
+  return data;
 }
 
 export async function getRunData(token: string, runToken: string) {
@@ -33,6 +37,7 @@ export async function getRunData(token: string, runToken: string) {
     `${API_URL}/api/projects/${token}/${runToken}`,
     { headers: getApiHeaders() }
   );
-  if (!response.status === 200) throw new Error('Failed to fetch run data');
-  return response.json();
+  const data = await readResponseData(response);
+  if (!response.ok) throw new Error(getResponseMessage(data, 'Failed to fetch run data'));
+  return data;
 }

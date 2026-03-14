@@ -1,6 +1,8 @@
 import { getApiBaseUrl, getApiHeaders } from "@/lib/apiBase";
 import { NextRequest, NextResponse } from 'next/server';
 
+export const dynamic = 'force-dynamic';
+
 export async function GET(request: NextRequest) {
   try {
     const searchParams = request.nextUrl.searchParams;
@@ -26,7 +28,7 @@ export async function GET(request: NextRequest) {
       headers: getApiHeaders(),
     });
 
-    if (!response.status === 200) {
+    if (!response.ok) {
       const error = await response.text();
       console.error('Backend error:', error);
       return NextResponse.json(

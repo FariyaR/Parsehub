@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import * as fs from 'fs'
 import * as path from 'path'
 
+export const dynamic = 'force-dynamic'
+
 function convertJsonToCsv(data: any): string {
   if (!Array.isArray(data) && typeof data === 'object') {
     // If data is a single object, wrap it

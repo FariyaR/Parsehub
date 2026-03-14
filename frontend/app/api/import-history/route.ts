@@ -1,7 +1,7 @@
 import { getApiBaseUrl, getApiHeaders } from "@/lib/apiBase";
 import { NextRequest, NextResponse } from 'next/server';
 
-const BACKEND_URL = getApiBaseUrl();
+export const dynamic = 'force-dynamic';
 
 /**
  * GET /api/import-history
@@ -20,7 +20,8 @@ export async function GET(request: NextRequest) {
     params.append('limit', limit);
     params.append('offset', offset);
 
-    const backendUrl = `${BACKEND_URL}/api/metadata/import-history?${params.toString()}`;
+    const backendBase = getApiBaseUrl();
+    const backendUrl = `${backendBase}/api/metadata/import-history?${params.toString()}`;
 
     console.log(`[API] GET /api/import-history - Proxying to: ${backendUrl}`);
 
@@ -35,7 +36,7 @@ export async function GET(request: NextRequest) {
 
     const data = await response.json();
 
-    if (!response.status === 200) {
+    if (!response.ok) {
       console.error(`[API] Backend returned ${response.status}:`, data);
       return NextResponse.json(
         { error: data.error || 'Failed to fetch import history' },

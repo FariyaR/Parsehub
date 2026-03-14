@@ -1,8 +1,6 @@
 import { getApiBaseUrl, getApiHeaders } from "@/lib/apiBase";
 import { NextRequest, NextResponse } from 'next/server';
 
-const BACKEND_URL = getApiBaseUrl();
-
 /**
  * POST /api/metadata/import
  * Imports metadata from Excel file
@@ -26,7 +24,8 @@ export async function POST(request: NextRequest) {
     const backendFormData = new FormData();
     backendFormData.append('file', file);
 
-    const backendUrl = `${BACKEND_URL}/api/metadata/import`;
+    const backendBase = getApiBaseUrl();
+    const backendUrl = `${backendBase}/api/metadata/import`;
 
     // Call Flask backend
     // NOTE: Do NOT set Content-Type header - fetch will set it automatically for FormData
@@ -49,7 +48,7 @@ export async function POST(request: NextRequest) {
 
     const data = await response.json();
 
-    if (!response.status === 200) {
+    if (!response.ok) {
       console.error(`[API] Backend returned ${response.status}:`, data);
       return NextResponse.json(
         { error: data.error || 'Failed to import metadata' },

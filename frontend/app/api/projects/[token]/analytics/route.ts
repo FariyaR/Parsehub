@@ -1,17 +1,16 @@
 import { getApiBaseUrl, getApiHeaders } from "@/lib/apiBase";
 import { NextRequest, NextResponse } from 'next/server'
 
-const BACKEND_URL = getApiBaseUrl();
-
 export async function GET(
   _request: NextRequest,
   { params }: { params: { token: string } }
 ) {
   try {
     const { token } = params
+    const backendUrl = getApiBaseUrl();
 
     const response = await fetch(
-      `${BACKEND_URL}/api/projects/${token}/analytics`,
+      `${backendUrl}/api/projects/${token}/analytics`,
       {
         headers: {
           'Content-Type': 'application/json',
@@ -20,7 +19,7 @@ export async function GET(
       }
     )
 
-    if (!response.status === 200) {
+    if (!response.ok) {
       return NextResponse.json(
         { error: 'Failed to fetch analytics' },
         { status: response.status }

@@ -1,6 +1,7 @@
 "use client";
 import apiClient from "@/lib/apiClient";
 import { getApiHeaders } from "@/lib/apiBase";
+import { getResponseMessage, readResponseData } from "@/lib/response";
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -300,17 +301,22 @@ export default function ProjectDetailsPage() {
         }),
       });
 
-      const data = response.data;
+      const data = await readResponseData<Record<string, any>>(response);
 
       // Check if auto-stop prevented the run
-      if (!response.status === 200) {
+      if (!response.ok) {
         if (data.metadata?.pages_scraped >= data.metadata?.total_pages) {
           setError(
             `✅ Scraping Complete! Already collected ${data.metadata.pages_scraped} of ${data.metadata.total_pages} target pages. ` +
               `Use "View CSV" to download your data.`,
           );
         } else {
-          setError(data.error || `Failed to start run: ${response.statusText}`);
+          setError(
+            getResponseMessage(
+              data,
+              `Failed to start run: ${response.statusText}`,
+            ),
+          );
         }
         setIsProjectRunning(false);
         setIsWaitingForRun(false);
@@ -371,12 +377,11 @@ export default function ProjectDetailsPage() {
         },
       });
 
-      if (!response.status === 200) {
-        const errorData = response.data.catch(() => ({}));
+      const data = await readResponseData<Record<string, unknown>>(response);
+
+      if (!response.ok) {
         throw new Error(
-          errorData.message ||
-            errorData.error ||
-            `Failed to cancel run: ${response.statusText}`,
+          getResponseMessage(data, `Failed to cancel run: ${response.statusText}`),
         );
       }
 

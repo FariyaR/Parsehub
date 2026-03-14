@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import axios from 'axios'
 
+export const dynamic = 'force-dynamic'
+
 const API_KEY = process.env.PARSEHUB_API_KEY || ''
 const BASE_URL = process.env.PARSEHUB_BASE_URL || 'https://www.parsehub.com/api/v2'
 

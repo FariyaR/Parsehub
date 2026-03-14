@@ -1,5 +1,6 @@
 import apiClient from "@/lib/apiClient";
 import { getApiHeaders } from "@/lib/apiBase";
+import { getResponseMessage, readResponseData } from "@/lib/response";
 import { useState, useEffect, useCallback, useRef } from 'react';
 
 interface MonitoringSession {
@@ -87,11 +88,11 @@ export function useRealTimeMonitoring(): UseRealTimeMonitoringReturn {
           }),
         });
 
-        if (!response.status === 200) {
-          throw new Error('Failed to start monitoring');
-        }
+        const result = await readResponseData<Record<string, any>>(response);
 
-        const result = response.data;
+        if (!response.ok) {
+          throw new Error(getResponseMessage(result, 'Failed to start monitoring'));
+        }
 
         if (!result.success && !result.sessionId) {
           throw new Error(result.error || 'Failed to start monitoring');
@@ -143,11 +144,11 @@ export function useRealTimeMonitoring(): UseRealTimeMonitoringReturn {
           headers: getApiHeaders(),
         });
 
-        if (!response.status === 200) {
-          throw new Error('Failed to fetch status');
-        }
+        const result = await readResponseData<Record<string, any>>(response);
 
-        const result = response.data;
+        if (!response.ok) {
+          throw new Error(getResponseMessage(result, 'Failed to fetch status'));
+        }
 
         setSession((prev) => {
           if (!prev) return null;
@@ -187,11 +188,11 @@ export function useRealTimeMonitoring(): UseRealTimeMonitoringReturn {
           { headers: getApiHeaders() }
         );
 
-        if (!response.status === 200) {
-          throw new Error('Failed to fetch data');
-        }
+        const result = await readResponseData<Record<string, any>>(response);
 
-        const result = response.data;
+        if (!response.ok) {
+          throw new Error(getResponseMessage(result, 'Failed to fetch data'));
+        }
 
         // Add new records (avoiding duplicates)
         setData((prev) => {

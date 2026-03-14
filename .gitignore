@@ -19,6 +19,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!frontend/lib/
+!frontend/lib/response.ts
 lib64/
 parts/
 sdist/

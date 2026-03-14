@@ -1,25 +1,24 @@
 import { getApiBaseUrl, getApiHeaders } from "@/lib/apiBase";
 import { NextRequest, NextResponse } from "next/server";
 
-const BACKEND_URL = getApiBaseUrl();
-
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
     const projectId = params.id;
+    const backendUrl = getApiBaseUrl();
     
     // Call the backend API
     const response = await fetch(
-      `${BACKEND_URL}/api/products/${projectId}/stats`,
+      `${backendUrl}/api/products/${projectId}/stats`,
       {
         method: "GET",
         headers: getApiHeaders(),
       }
     );
 
-    if (!response.status === 200) {
+    if (!response.ok) {
       console.error(
         `Backend error: ${response.status} ${response.statusText}`
       );
